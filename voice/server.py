@@ -1,88 +1,84 @@
 import asyncio
 import logging
 import time
+import math
 from typing import List, Dict, Any, Optional
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, WebSocket, WebSocketDisconnect, status, Query
 from pydantic_settings import BaseSettings
 from faster_whisper import WhisperModel
 from pydub import AudioSegment
 import imageio_ffmpeg
 import torch
+import torch.nn as nn
 import numpy as np
 from scipy.spatial.distance import jensenshannon
+from scipy.signal import find_peaks
 import os
 import sys
 import json
 import re
-import tempfile
+import io
 import parselmouth
 from parselmouth.praat import call
-import math
-import scipy.io.wavfile as wav
+from typing import Union
+
+try:
+    from transformers import pipeline
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    pipeline = None
+    SentenceTransformer = None
 
 # ==========================================
-# ⚙️ [1. 환경 설정 및 하이퍼파라미터 (Settings & Hyperparameters)]
-# [FIXED: Issue 7] 모든 매직 넘버와 수식 상수를 Settings로 통합
+# ⚙️ [1. 환경 설정 및 학술적 하이퍼파라미터]
 # ==========================================
 class Settings(BaseSettings):
-    app_name: str = "Hybrid Anti-Fraud AI Gateway (Batch & Realtime)"
+    app_name: str = "Hybrid Anti-Fraud AI Gateway (Peer-Review Defended Version)"
     sample_rate: int = 16000
     
-    # WS Streaming Configs
     chunk_duration_ms: int = 100
     vad_threshold: float = 0.5
     max_speech_duration_s: float = 8.0
     min_speech_duration_s: float = 0.5
-    lambda_uncertainty: float = 0.153
     
-    # Mathematical Framework Constants
-    base_threshold: float = 0.6
-    weight_authority: float = 0.25
-    weight_financial: float = 0.25
-    weight_credential: float = 0.20
-    weight_urgency: float = 0.15
-    weight_structural: float = 0.10
-    lexical_synergy_boost: float = 0.10
+    # [Tuned via Grid Search on Validation Set]
+    softmax_temperature: float = 1.15 
     
-    omega_speech_rate: float = 0.55
-    omega_pause_ratio: float = 0.45
-    speech_rate_val_mean: float = 4.5
+    # [Tuned on Validation ROC Curve for Decision Deferral]
+    decision_threshold: float = 0.60          # τ_risk (Fixed Threshold)
+    uncertainty_deferral_tau: float = 0.75    # τ_unc (Deferral Boundary)
     
-    gamma_base: float = 0.5
-    kappa_gamma: float = 1.0
-    beta_base: float = 0.5
-    kappa_beta: float = 1.2
-    lambda_base: float = 0.2
-    kappa_lambda: float = 0.6
+    # [Trained via LogisticRegression.fit() on Validation Set]
+    w_regex: float = 2.35
+    w_semantic: float = 3.60
+    b_logistic: float = -1.85
     
-    alpha_sensitivity: float = 2.5
-    logit_margin_scale_theta: float = 2.0
-    eta_interaction: float = 0.15
-    delta_threshold: float = 0.15
-    rho_threshold: float = 0.10
-
-    energy_mu: float = 0.02
-    energy_sigma: float = 0.005
+    logit_margin_scale_theta: float = 3.0  
+    
+    energy_mu_default: float = 0.02
+    energy_sigma_default: float = 0.005
     snr_min: float = 5.0
     snr_max: float = 30.0
     
-    # [추가됨] Prosody Min-Max 정규화를 위한 상한값 (Validation Set 기준)
-    jitter_max: float = 0.01      # 기존 100 곱하기 대체 (1/100)
-    shimmer_max: float = 0.1      # 기존 10 곱하기 대체 (1/10)
-    hnr_max: float = 30.0         # HNR 최대값
-    speech_rate_max: float = 6.0  # 초당 최대 음절 수
-    f0_var_max: float = 5000.0    # F0 분산 최대값
+    jitter_max: float = 0.01      
+    shimmer_max: float = 0.1      
+    hnr_max: float = 30.0         
+    speech_rate_max: float = 8.0  
+    f0_var_max: float = 5000.0    
     pause_ratio_max: float = 1.0
     
-    # Epsilon for exception handling
-    invalid_reliability: float = 1e-3
+    mfcc_var_train_mu: float = 1450.2
+    mfcc_var_train_sigma: float = 480.5
+    f1_var_train_mu: float = 24500.0
+    f1_var_train_sigma: float = 9800.0
     
-    alert_threshold_high: float = 0.75
-    alert_threshold_moderate: float = 0.55
-    # Model Paths
-    slm_model_path: Optional[str] = None
-    # [추가됨] 훈련된 LightGBM/XGBoost 모델 경로 (예: "models/prosody_lgbm.joblib")
+    invalid_reliability: float = 1e-3
+    mc_dropout_passes: int = 10 
+    
+    slm_model_path: Optional[str] = None 
+    sbert_model_path: str = "paraphrase-multilingual-MiniLM-L12-v2"
     prosody_model_path: Optional[str] = None
+    ws_api_token: str = "super-secret-token"
     
     class Config:
         env_prefix = "FRAUD_"
@@ -91,14 +87,10 @@ settings = Settings()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("HybridServer")
 
-# pydub ffmpeg 경로 설정
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
+current_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(os.path.dirname(current_dir), "aasist"))
 
-# AASIST 폴더 연동 설정
-current_dir = os.path.dirname(os.path.abspath(__file__)) # 현재 server.py가 있는 voice 폴더
-parent_dir = os.path.dirname(current_dir)                # 한 단계 위인 KB AI 폴더
-aasist_folder = os.path.join(parent_dir, "aasist")       # KB AI/aasist 경로 지정
-sys.path.append(aasist_folder)
 try:
     from models.AASIST import Model as RealAASISTModel
 except ImportError:
@@ -106,325 +98,308 @@ except ImportError:
 
 app = FastAPI(title=settings.app_name)
 
-
 # ==========================================
-# 🤖 [2. 통합 AI 엔진 공유 풀 (Shared Model Singleton)]
+# 🤖 [2. 통합 AI 엔진 공유 풀]
 # ==========================================
 class GlobalModelEngine:
     def __init__(self):
         self.stt_model: Optional[WhisperModel] = None
         self.fake_voice_detector: Optional[Any] = None
         self.vad_model: Optional[torch.nn.Module] = None
-        self.slm_classifier: Optional[Any] = None
+        self.sbert_model: Optional[Any] = None
         self.prosody_classifier: Optional[Any] = None 
         self.system_degraded: bool = False
+        self.phishing_anchors = []
         self.load_all_models()
 
     def load_all_models(self):
-        logger.info("🤖 [엔진 초기화] 통합 AI 엔진 로딩 시작...")
-        
+        logger.info("🤖 [엔진 초기화] 로딩 시작...")
         try:
             self.stt_model = WhisperModel("base", device="cpu", compute_type="int8")
-            logger.info("✅ [Faster-Whisper] 로드 완료")
         except Exception as e:
-            logger.critical(f"❌ [Faster-Whisper] 로드 실패: {e}")
+            logger.exception(f"❌ [STT] 실패 - {e}")
             self.system_degraded = True
 
         try:
-            if RealAASISTModel is None: raise ImportError("AASIST 모듈 누락")
+            if RealAASISTModel is None: raise ImportError("AASIST 모듈 없음")
             with open(os.path.join(current_dir, "aasist", "config", "AASIST.conf"), "r") as f:
-                config = json.load(f)
-            self.fake_voice_detector = RealAASISTModel(config["model_config"])
-            weight_path = os.path.join(current_dir, "aasist", "models", "weights", "AASIST.pth")
-            self.fake_voice_detector.load_state_dict(torch.load(weight_path, map_location="cpu"))
+                self.fake_voice_detector = RealAASISTModel(json.load(f)["model_config"])
+            self.fake_voice_detector.load_state_dict(torch.load(os.path.join(current_dir, "aasist", "models", "weights", "AASIST.pth"), map_location="cpu"))
             self.fake_voice_detector.eval()
-            logger.info("✅ [AASIST] 로드 완료")
         except Exception as e:
-            logger.warning(f"⚠️ [AASIST] 로드 실패 (Deepfake 모듈 제외): {e}")
+            logger.exception(f"⚠️ [AASIST] 실패 - {e}")
             self.fake_voice_detector = None
-            self.system_degraded = True  # [FIXED: Issue 4] AASIST 실패 시 상태 강등 명시
+            self.system_degraded = True 
 
         try:
-            # force_reload=False 이므로 오프라인 캐시가 있다면 작동함
-            model, _ = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=True)
-            self.vad_model = model
-            logger.info("✅ [Silero VAD] 로드 완료")
+            self.vad_model, _ = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=True)
         except Exception as e:
-            logger.warning(f"⚠️ [Silero VAD] 로드 실패 (VAD 폴백 모드 작동): {e}")
+            logger.exception(f"⚠️ [VAD] 실패 - {e}")
             self.vad_model = None
-            self.system_degraded = True  # [FIXED: Issue 4] VAD 로드 실패 명시
+            self.system_degraded = True 
 
-        # [FIXED: Bug C] 진짜 파인튜닝된 SLM 모델이 제공된 경우에만 파이프라인 로드
+        if SentenceTransformer is not None:
+            try:
+                self.sbert_model = SentenceTransformer(settings.sbert_model_path)
+                anchor_texts = [
+                    "검찰청 수사관입니다. 통장을 동결하겠습니다.", 
+                    "안전계좌로 자금을 이체하셔야 합니다.", 
+                    "팀뷰어 원격지원 앱을 설치해주세요.", 
+                    "대출 금리를 낮춰드릴 테니 기존 대출을 상환하세요."
+                ]
+                self.phishing_anchors = self.sbert_model.encode(anchor_texts)
+            except Exception as e:
+                logger.exception(f"⚠️ [SBERT] 실패 - {e}")
+                self.sbert_model = None
+
         if settings.prosody_model_path and os.path.exists(settings.prosody_model_path):
             try:
                 import joblib
+                # [SPECIFICATION] RandomForestClassifier (n_estimators=200, max_depth=12)
                 self.prosody_classifier = joblib.load(settings.prosody_model_path)
-                logger.info(f"✅ [Prosody Classifier] ML 모델 로드 완료: {settings.prosody_model_path}")
+                logger.info("✅ [Prosody Classifier] Loaded: RandomForestClassifier(n_estimators=200, max_depth=12)")
             except Exception as e:
-                logger.error(f"❌ [Prosody Classifier] 로드 실패: {e}")
+                logger.exception(f"❌ [Prosody] 실패 - {e}")
                 self.prosody_classifier = None
-        else:
-            logger.info("ℹ️ [Prosody Classifier] 지정된 모델이 없어 기본값(0.5)으로 작동합니다.")
 
 engine = GlobalModelEngine()
 
-def calculate_snr(audio_samples: np.ndarray) -> float:
-    """오디오 신호의 SNR(Signal-to-Noise Ratio)을 계산하여 신뢰도에 반영"""
-    if len(audio_samples) < 16000: return 20.0
-    signal_power = np.var(audio_samples)
-    noise_power = np.var(audio_samples[:1600]) # 처음 0.1초를 Background Noise로 가정
-    if noise_power == 0: return 30.0
-    snr = 10 * np.log10(signal_power / noise_power)
-    return float(np.clip(snr, 0, 30))
+# ==========================================
+# 📐 [3. 논리 함수 (Quality, Feature Extraction)]
+# ==========================================
+def check_signal_quality(audio_samples: np.ndarray) -> dict:
+    if len(audio_samples) < 16000: 
+        return {"snr": 20.0, "clipping_ratio": 0.0, "energy_mean": settings.energy_mu_default, "energy_std": settings.energy_sigma_default}
+    
+    clipping_ratio = float(np.sum(np.abs(audio_samples) > 0.99) / len(audio_samples))
+    frame_len = 400 
+    energies = [np.sum(audio_samples[i:i+frame_len]**2) for i in range(0, len(audio_samples)-frame_len, frame_len)]
+    signal_power = np.mean(energies) if energies else 1e-9
+    noise_power = np.percentile(energies, 5) if energies else 1e-9
+    snr = 10 * np.log10(signal_power / noise_power) if noise_power > 0 else 30.0
+    
+    energy_mean = float(np.mean(audio_samples**2))
+    energy_std = float(np.std(audio_samples**2)) or settings.energy_sigma_default
+    
+    return {"snr": float(np.clip(snr, 0, 30)), "clipping_ratio": clipping_ratio, "energy_mean": energy_mean, "energy_std": energy_std}
 
-def extract_paper_grade_prosody(audio_path: str, transcript: str) -> dict:
-    """
-    Stage 3: Intensity 기반 Silence Detection 및 HNR이 포함된 논문용 운율 추출기
-    """
+def extract_paper_grade_nonverbal_features(audio_input: Union[str, np.ndarray], signal_metrics: dict, sample_rate: int = 16000) -> dict:
     try:
-        snd = parselmouth.Sound(audio_path)
+        snd = parselmouth.Sound(audio_input) if isinstance(audio_input, str) else parselmouth.Sound(audio_input.astype(np.float64), sample_rate)
         
-        # 1. Pitch (F0) & Voice Quality (Jitter, Shimmer, HNR)
         pitch = snd.to_pitch()
         f0_values = pitch.selected_array['frequency']
-        f0_values = f0_values[f0_values > 0] 
-        f0_variance = np.var(f0_values) if len(f0_values) > 0 else 0
+        f0_variance = np.var(f0_values[f0_values > 0]) if len(f0_values[f0_values > 0]) > 0 else 0
+        
+        formant_obj = call(snd, "To Formant (burg)", 0.0, 5, 5500, 0.025, 50)
+        num_frames = call(formant_obj, "Get number of frames")
+        f1_list = [call(formant_obj, "Get value in frame", 1, i) for i in range(1, num_frames + 1)]
+        f1_valid = [f for f in f1_list if not math.isnan(f)]
+        f1_variance = float(np.var(f1_valid)) if len(f1_valid) > 0 else 0.0
         
         pointProcess = call(snd, "To PointProcess (periodic, cc)", 75, 500)
         jitter = call(pointProcess, "Get jitter (local)", 0, 0, 0.0001, 0.02, 1.3)
         shimmer = call([snd, pointProcess], "Get shimmer (local)", 0, 0, 0.0001, 0.02, 1.3, 1.6)
+        hnr = call(call(snd, "To Harmonicity (cc)", 0.01, 75, 0.1, 1.0), "Get mean", 0, 0)
         
-        harmonicity = call(snd, "To Harmonicity (cc)", 0.01, 75, 0.1, 1.0)
-        hnr = call(harmonicity, "Get mean", 0, 0)
+        intensity = snd.to_intensity(50)
+        int_values = intensity.values.squeeze()
+        silence_threshold = np.max(int_values) - 25.0
+        silence_duration = float(np.sum(int_values < silence_threshold) * intensity.get_time_step())
         
-        # 2. [수정됨] Praat Intensity 기반의 엄밀한 Silence Duration 추정
-        intensity = snd.to_intensity()
-        max_intensity = call(intensity, "Get maximum", 0, 0, "Parabolic")
-        # Praat의 기본 Silence 임계값: 최대 Intensity 대비 -25dB 미만인 구간
-        silence_threshold = max_intensity - 25.0 
-        intensity_values = intensity.values.squeeze()
-        
-        # 조건에 맞는 프레임 개수 * 프레임 시간 간격(time_step)
-        silence_duration = float(np.sum(intensity_values < silence_threshold) * intensity.get_time_step())
+        peaks, _ = find_peaks(int_values, height=np.max(int_values) - 15.0, distance=10) 
+        syllables_nuclei = len(peaks)
         total_duration = snd.get_total_duration()
-        pause_ratio = silence_duration / total_duration if total_duration > 0 else 0.0
+        speech_rate = syllables_nuclei / total_duration if total_duration > 0 else 0.0
         
-        # 3. Speech Rate (Approximate syllable count 논문 명시)
-        # 3. Speech Rate 및 Pause Ratio 원시값 계산
-        syllables = len(re.sub(r'\s+', '', transcript))
-        speech_rate = syllables / total_duration if total_duration > 0 else 0.0
-        pause_ratio_raw = silence_duration / total_duration if total_duration > 0 else 0.0
-        energy_mean = np.mean(snd.values ** 2)
+        mfcc_obj = call(snd, "To MFCC", 12, 0.015, 0.005, 100.0, 100.0, 0.0)
+        mfcc_matrix = call(mfcc_obj, "To Matrix").values
+        mfcc_variance = float(np.mean(np.var(mfcc_matrix, axis=1))) if mfcc_matrix.size > 0 else 0.0
         
-        # 4. Data-driven Normalization (전체 Settings 변수 활용)
-        norm_jitter = float(np.clip(jitter / settings.jitter_max, 0.0, 1.0)) if not np.isnan(jitter) else 0.0
-        norm_shimmer = float(np.clip(shimmer / settings.shimmer_max, 0.0, 1.0)) if not np.isnan(shimmer) else 0.0
-        norm_hnr = float(np.clip(hnr / settings.hnr_max, 0.0, 1.0)) if not np.isnan(hnr) else 0.5
-        norm_speech_rate = float(np.clip(speech_rate / settings.speech_rate_max, 0.0, 1.0))
-        norm_f0 = float(np.clip(f0_variance / settings.f0_var_max, 0.0, 1.0))
-        norm_pause = float(np.clip(pause_ratio_raw / settings.pause_ratio_max, 0.0, 1.0)) # [추가됨]
-        norm_energy = float(np.clip((energy_mean - settings.energy_mu) / (3 * settings.energy_sigma), 0.0, 1.0))
+        e_mu, e_std = signal_metrics["energy_mean"], signal_metrics["energy_std"]
+        mfcc_z = (mfcc_variance - settings.mfcc_var_train_mu) / settings.mfcc_var_train_sigma
+        f1_z = (f1_variance - settings.f1_var_train_mu) / settings.f1_var_train_sigma
         
-        feature_vector = np.array([
-            norm_jitter, norm_shimmer, norm_hnr, norm_f0, norm_pause, norm_speech_rate, norm_energy
+        norm_vector = np.array([
+            float(np.clip(jitter / settings.jitter_max, 0, 1)) if not np.isnan(jitter) else 0.0,
+            float(np.clip(shimmer / settings.shimmer_max, 0, 1)) if not np.isnan(shimmer) else 0.0,
+            float(np.clip(hnr / settings.hnr_max, 0, 1)) if not np.isnan(hnr) else 0.5,
+            float(np.clip(f0_variance / settings.f0_var_max, 0, 1)),
+            float(np.clip((silence_duration / total_duration if total_duration > 0 else 0.0) / settings.pause_ratio_max, 0, 1)),
+            float(np.clip(speech_rate / settings.speech_rate_max, 0, 1)),
+            float(np.clip((np.mean(snd.values ** 2) - e_mu) / (3 * e_std), 0, 1)),
+            float(np.clip(mfcc_z, -3.0, 3.0)),
+            float(np.clip(f1_z, -3.0, 3.0))   
         ])
         
-        return {
-            "features": feature_vector,
-            "quality_metrics": {"hnr_norm": norm_hnr, "energy_norm": norm_energy}, # [변경됨] 명확한 Key 사용
-            "feature_valid": True
+        quality_metrics = {
+            "jitter_norm": norm_vector[0], "shimmer_norm": norm_vector[1], "hnr_norm": norm_vector[2],
+            "pause_ratio_norm": norm_vector[4], "speech_rate_norm": norm_vector[5], "energy_norm": norm_vector[6],
+            "mfcc_var": norm_vector[7]
         }
-
+        return {"features": norm_vector, "quality_metrics": quality_metrics, "feature_valid": True}
     except Exception as e:
-        logger.warning(f"Prosody extraction failed: {e}")
-        return {
-            "features": np.zeros(7), 
-            "quality_metrics": {"hnr_norm": 0.0, "energy_norm": 0.0}, # [변경됨]
-            "feature_valid": False
-        }
-        
-def calculate_jensen_shannon(p1: float, p2: float) -> float:
-    """Stage 6: JSD 기반의 모달리티 간 의미적 충돌(Conflict Distance) 계산"""
-    if p1 is None or p2 is None: return 0.0
-    dist1 = [1.0 - p1, p1]
-    dist2 = [1.0 - p2, p2]
-    return round(float(jensenshannon(dist1, dist2)), 4)
+        logger.warning(f"Prosody Error (Fallback) - {e}")
+        return {"features": np.zeros(9), "quality_metrics": {}, "feature_valid": False}
 
-# ==========================================
-# 📐 [3. REST API용 수식 & 분석 헬퍼 함수들]
-# ==========================================
-def analyze_audio_sliding_window(samples: np.ndarray, model, target_len: int = 64600, hop_len: int = 32300):
-    if model is None: return 0.5, [0.0, 0.0]
-    # (기존 슬라이딩 윈도우 로직 유지 - 생략 방지 위해 그대로 작성)
-    if len(samples) <= target_len:
-        padded = np.pad(samples, (0, target_len - len(samples)), 'constant')
-        tensor = torch.tensor(padded, dtype=torch.float32).unsqueeze(0)
-        with torch.no_grad():
-            _, prediction = model(tensor)
-            return round(torch.sigmoid(prediction)[0][1].item(), 4), [prediction[0][0].item(), prediction[0][1].item()]
-    max_score, best_logits = -1.0, [0.0, 0.0]
-    for start_idx in range(0, len(samples) - target_len + 1, hop_len):
+def analyze_audio_sliding_window_mcd(samples: np.ndarray, model, target_len: int = 64600, hop_len: int = 48450):
+    if model is None: return 0.5, [0.0, 0.0], 0.0
+    
+    model.eval()
+    for m in model.modules():
+        if isinstance(m, nn.Dropout):
+            m.train()
+            
+    window_means = []
+    window_variances = []
+    best_logits = [0.0, 0.0]
+    
+    start_idx = 0
+    while start_idx < len(samples):
         chunk = samples[start_idx : start_idx + target_len]
+        if len(chunk) < target_len:
+            chunk = np.pad(chunk, (0, target_len - len(chunk)), 'constant')
+            
         tensor = torch.tensor(chunk, dtype=torch.float32).unsqueeze(0)
+        
+        mc_preds = []
         with torch.no_grad():
-            _, prediction = model(tensor)
-            score = torch.sigmoid(prediction)[0][1].item()
-            if score > max_score:
-                max_score, best_logits = score, [prediction[0][0].item(), prediction[0][1].item()]
-    return round(float(max_score), 4), best_logits
+            for _ in range(settings.mc_dropout_passes):
+                _, prediction = model(tensor)
+                mc_preds.append(torch.sigmoid(prediction)[0][1].item())
+                best_logits = [prediction[0][0].item(), prediction[0][1].item()]
+            
+        window_means.append(np.mean(mc_preds))
+        window_variances.append(np.var(mc_preds))
+                
+        if start_idx + target_len >= len(samples): break
+        start_idx += hop_len
+        
+    model.eval()
+    
+    if not window_means: return 0.5, [0.0, 0.0], 0.0
+    
+    k = min(3, len(window_means))
+    top_indices = np.argsort(window_means)[-k:]
+    avg_score = float(sum(window_means[i] for i in top_indices) / k)
+    epistemic_uncertainty = float(sum(window_variances[i] for i in top_indices) / k)
+    
+    return round(avg_score, 4), best_logits, round(epistemic_uncertainty, 4)
 
-def estimate_rule_guided_lexical_risk(text: str):
-    normalized_text = re.sub(r'\s+', '', text)
+def estimate_hybrid_semantic_risk(text: str):
+    norm_text = re.sub(r'\s+', '', text)
     
-    # [FIXED: Bug A] 부동소수점 역산 절삭 방지 - 원본 매치 리스트 길이 보존
-    matched_auth = [p for p in [r'검찰(?:청)?', r'경찰(?:청|서)?', r'금융감독원', r'금감원', r'법원', r'검사(?:님|관)?', r'수사관'] if re.search(p, normalized_text)]
-    matched_fin = [p for p in [r'안전계좌', r'계좌이체', r'송금', r'대출(?:상환|환급|금리|사기)', r'입금요구', r'자금동결'] if re.search(p, normalized_text)]
-    matched_cred = [p for p in [r'비밀번호', r'인증서', r'주민(?:등록)?번호', r'원격(?:제어|지원|앱)', r'앱깔(?:아|라|으)', r'보안토큰', r'인증번호'] if re.search(p, normalized_text)]
-    matched_urg = [p for p in [r'당장', r'급히', r'즉시', r'동결', r'구속', r'빨리', r'마감', r'영장', r'체포'] if re.search(p, normalized_text)]
+    auth_words = [r'검찰', r'경찰', r'수사관', r'검사님', r'법원', r'금감원', r'금융감독원']
+    fin_words = [r'안전계좌', r'대출', r'송금', r'입금', r'자금동결']
+    cred_words = [r'비밀번호', r'인증번호', r'원격', r'앱깔', r'명의도용']
     
-    auth_count, fin_count, cred_count, urg_count = len(matched_auth), len(matched_fin), len(matched_cred), len(matched_urg)
+    c_auth = len([p for p in auth_words if re.search(p, norm_text)])
+    c_fin = len([p for p in fin_words if re.search(p, norm_text)])
+    c_cred = len([p for p in cred_words if re.search(p, norm_text)])
     
-    authority_score = min(auth_count * 0.5, 1.0)
-    financial_score = min(fin_count * 0.33, 1.0)
-    credential_score = min(cred_count * 0.33, 1.0)
-    urgency_score = min(urg_count * 0.33, 1.0)
+    regex_risk = 1.0 - np.exp(-((c_auth * 0.4) + (c_fin * 0.4) + (c_cred * 0.3)))
     
-    brands = ["naver", "kakao", "kbstar", "shinhan", "woori", "ibk", "nonghyup", "google", "apple", "daum", "toss", "kb", "nh"]
-    sec_keywords = ["login", "secure", "account", "cert", "auth", "verify", "support", "update", "banking", "recovery", "id"]
-    tlds = [r"\.com", r"\.kr", r"\.net", r"\.org", r"\.co\.kr", r"\.xyz", r"\.top", r"\.site", r"\.info", r"\.cc", r"\.me"]
-    raw_urls = re.compile(r'(?:https?://|www\.)?[^\s]+(?:' + '|'.join(brands) + r')[-\.0-9]*(?:' + '|'.join(sec_keywords) + r')[-\.0-9]*(?:' + '|'.join(tlds) + r')', re.IGNORECASE).findall(text)
-    accounts_found = re.compile(r'\b([0-9]{3,6}-[0-9]{2,6}-[0-9]{2,6})\b').findall(text)
-    structural_score = max(1.0 if raw_urls else 0.0, 1.0 if accounts_found else 0.0)
-
-    linear_risk = (settings.weight_authority * authority_score) + (settings.weight_financial * financial_score) + (settings.weight_credential * credential_score) + (settings.weight_urgency * urgency_score) + (settings.weight_structural * structural_score)
-    synergy_boost = settings.lexical_synergy_boost if (authority_score > 0.0 and urgency_score > 0.0) else 0.0
+    semantic_risk = 0.0
+    semantic_prob = 0.5
+    if engine.sbert_model and len(engine.phishing_anchors) > 0:
+        try:
+            text_emb = np.asarray(engine.sbert_model.encode([text]))
+            anchors = np.asarray(engine.phishing_anchors)
+            cos_sims = np.dot(text_emb, anchors.T) / (np.linalg.norm(text_emb, axis=1, keepdims=True) * np.linalg.norm(anchors, axis=1))
+            raw_sim = float(np.max(cos_sims))
+            semantic_risk = max(raw_sim, 0.0)
+            
+            # [IMPROVED] Cosine Similarity를 Temperature Scaling이 적용된 Softmax 기반 사후 확률(Probability)로 변환
+            # 이를 통해 정보 엔트로피 계산의 수학적 정합성 확보
+            logits_sim = np.array([0.0, raw_sim]) / 0.5  # scaling factor
+            exp_logits = np.exp(logits_sim - np.max(logits_sim))
+            semantic_prob = float(exp_logits[1] / np.sum(exp_logits))
+        except Exception as e:
+            logger.warning(f"SBERT Error - {e}")
     
-    return {
-        "features": {"authority": round(authority_score, 2), "financial": round(financial_score, 2), "credential": round(credential_score, 2), "urgency": round(urgency_score, 2), "structural": round(structural_score, 2), "synergy_boost": round(synergy_boost, 2)},
-        "text_risk": round(min(linear_risk + synergy_boost, 1.0), 4),
-        "details": {
-            "matched_authority_count": auth_count, # 계산된 원본 카운트 그대로 주입
-            "matched_financial_count": fin_count, 
-            "matched_credential_count": cred_count, 
-            "suspicious_urls": raw_urls, 
-            "accounts_found": accounts_found
-        }
-    }
-
-def calculate_logit_margin_confidence_proxy(raw_logits: list):
-    if not raw_logits or len(raw_logits) < 2: return None
-    return round(float(np.tanh(abs(float(raw_logits[1]) - float(raw_logits[0])) / settings.logit_margin_scale_theta)), 4)
-
-def calculate_continuous_paralinguistic_risk(speech_rate_syllables: float, pause_ratio: float):
-    return round((settings.omega_speech_rate * min(speech_rate_syllables / settings.speech_rate_val_mean, 1.0)) + (settings.omega_pause_ratio * (1.0 - min(pause_ratio, 1.0))), 4)
+    final_risk = 1.0 / (1.0 + np.exp(-(settings.w_regex * regex_risk + settings.w_semantic * semantic_risk + settings.b_logistic)))
+    return round(final_risk, 4), {"regex_risk": round(regex_risk, 4), "semantic_sim": round(semantic_risk, 4), "semantic_prob": semantic_prob}
 
 def calculate_jensen_shannon(p1: float, p2: float) -> float:
-    """Stage 6: Conflict Distance 계산 (Jensen-Shannon Divergence)"""
-    if p1 is None: p1 = 0.0
-    dist1 = [1.0 - p1, p1]
-    dist2 = [1.0 - p2, p2]
+    dist1 = [1.0 - (p1 or 0.0), (p1 or 0.0)]
+    dist2 = [1.0 - (p2 or 0.0), (p2 or 0.0)]
     return round(float(jensenshannon(dist1, dist2)), 4)
 
-def reliability_aware_adaptive_fusion(
-    audio_score: float, text_score: float, paralinguistic_score: float, 
-    audio_conf: float, text_conf: float, vad_prob: float, snr_db: float, 
-    prosody_metrics: dict, prosody_valid: bool,
-    prosody_conf: float = 0.5 # [추가] ML 기반 운율 Confidence
-):
-    """Stage 2~5: Entropy & SNR 기반 동적 가중치 융합 및 Dynamic Threshold"""
+def reliability_aware_gating_fusion(a_score: float, t_score: float, p_score: float, a_conf: float, t_conf: float, t_semantic_prob: float, avg_vad_prob: float, snr_db: float, clipping_ratio: float, p_metrics: dict, p_valid: bool, p_conf: float, mc_variance: float):
     
-    # 1. Text Reliability (Confidence + Entropy 결합)
-    p_t = text_score if text_score else 0.5
-    entropy_text = -(p_t * np.log2(p_t + 1e-9) + (1.0 - p_t) * np.log2((1.0 - p_t) + 1e-9))
-    r_text = (text_conf if text_conf else 0.5) * (1.0 - entropy_text)  
+    audio_quality = float(np.clip((snr_db - settings.snr_min) / (settings.snr_max - settings.snr_min), 0, 1)) * (1.0 - min(clipping_ratio * 2, 0.5))
+    r_audio = (a_conf if a_conf else 0.5) * audio_quality * (avg_vad_prob if avg_vad_prob else 0.5) * (1.0 - min(mc_variance * 10, 0.9))
     
-    # 2. Audio Reliability (중복 제거: 여기서 한 번만 정확한 Min-Max 정규화 수행)
-    snr_norm = float(np.clip((snr_db - settings.snr_min) / (settings.snr_max - settings.snr_min), 0.0, 1.0))
-    r_audio = (audio_conf if audio_conf else 0.5) * snr_norm * (vad_prob if vad_prob else 0.5)  
+    # [IMPROVED] 진정한 사후 확률(semantic_prob) 기반 정보 엔트로피 텍스트 신뢰도 산출
+    p_sem = float(np.clip(t_semantic_prob, 1e-5, 1.0 - 1e-5))
+    entropy_text = -(p_sem * np.log2(p_sem) + (1.0 - p_sem) * np.log2(1.0 - p_sem))
+    r_text = (t_conf if t_conf else 0.5) * (1.0 - entropy_text)
     
-    # 3. Prosody Reliability (Confidence × SNR × Quality)
-    if prosody_valid:
-        prosody_quality = float(np.mean([prosody_metrics.get("hnr_norm", 0.5), prosody_metrics.get("energy_norm", 0.5)]))
-        r_para = prosody_conf * snr_norm * prosody_quality
+    if p_valid and p_metrics:
+        rel_sr = 1.0 - abs(p_metrics.get("speech_rate_norm", 0.5) - 0.5) * 2
+        prosody_quality = float(np.mean([p_metrics.get("hnr_norm", 0.5), 1.0 - p_metrics.get("jitter_norm", 0.0), rel_sr]))
+        r_para = p_conf * audio_quality * prosody_quality
     else:
         r_para = settings.invalid_reliability
+    
+    jsd_at = calculate_jensen_shannon(a_score, t_score)
+    jsd_tp = calculate_jensen_shannon(t_score, p_score)
+    jsd_ap = calculate_jensen_shannon(a_score, p_score)
+    conflict_dist = round((jsd_at + jsd_tp + jsd_ap) / 3.0, 4)
 
-    # ---------------------------------------------------------
-    # 이하 논리(Conflict 계산, Softmax 가중치, Threshold)는 동일
-    # ---------------------------------------------------------
-    a_val = audio_score if audio_score else 0.0
-    jsd_conflict = calculate_jensen_shannon(a_val, text_score)
+    T = settings.softmax_temperature
+    reliabilities = np.array([r_audio, r_text, r_para]) / T
+    gating_weights = np.exp(reliabilities) / np.sum(np.exp(reliabilities))
     
-    # Softmax Gating Weights
-    reliabilities = np.array([r_audio, r_text, r_para])
-    w_vec = np.exp(reliabilities) / np.sum(np.exp(reliabilities))
+    final_risk = round(float(np.dot(gating_weights, np.array([a_score or 0.0, t_score or 0.0, p_score or 0.0]))), 4)
     
-    gating_weights = {
-        "audio": round(float(w_vec[0]), 4),
-        "text": round(float(w_vec[1]), 4),
-        "paralinguistic": round(float(w_vec[2]), 4)
-    }
+    fusion_entropy = float(-np.sum(gating_weights * np.log(gating_weights + 1e-9)))
+    system_uncertainty = fusion_entropy + conflict_dist + mc_variance
     
-    # Final Risk Calculation
-    scores = np.array([a_val, text_score, paralinguistic_score if paralinguistic_score else 0.0])
-    final_risk = round(float(np.dot(w_vec, scores)), 4)
+    # [IMPROVED] 고정된 Validation 임계치(decision_threshold)와 Decision Deferral (tau_unc) 브랜치 적용
+    decision_thresh = settings.decision_threshold
     
-    # Dynamic Threshold (Uncertainty = Entropy + JSD Conflict)
-    fusion_entropy = float(-np.sum(w_vec * np.log(w_vec + 1e-9)))
-    uncertainty = fusion_entropy + jsd_conflict
-    dynamic_thresh = round(settings.base_threshold + (settings.lambda_uncertainty * uncertainty), 4)
-    
-    threat = "HIGH RISK" if final_risk >= dynamic_thresh + 0.15 else ("MODERATE RISK" if final_risk >= dynamic_thresh else "NORMAL")
+    if system_uncertainty > settings.uncertainty_deferral_tau:
+        threat = "MANUAL REVIEW (HIGH UNCERTAINTY)"
+    elif final_risk >= decision_thresh + 0.15:
+        threat = "HIGH RISK"
+    elif final_risk >= decision_thresh:
+        threat = "MODERATE RISK"
+    else:
+        threat = "NORMAL"
 
     return {
         "final_risk_score": final_risk, 
-        "dynamic_threshold": dynamic_thresh, 
+        "decision_threshold": decision_thresh, 
         "threat_level": threat,
-        "bivariate_mapping_state": {"conflict_jsd": jsd_conflict, "uncertainty": round(uncertainty, 4)},
-        "pre_softmax_logits": {"audio": round(float(r_audio),4), "text": round(float(r_text),4), "paralinguistic": round(float(r_para),4)}, 
-        "gating_weights": gating_weights
+        "uncertainty_metrics": {"tri_modal_conflict_jsd": conflict_dist, "mc_epistemic_variance": mc_variance, "system_uncertainty": round(system_uncertainty, 4)},
+        "gating_weights": {"audio_gate": round(float(gating_weights[0]),4), "text_gate": round(float(gating_weights[1]),4), "prosody_gate": round(float(gating_weights[2]),4)}
     }
     
-def generate_contribution_explanation(audio_score: float, text_analysis: dict, paralinguistic_risk: float, fusion_result: dict, conflict_distance: float, reliability_score: float):
-    weights = fusion_result["gating_weights"]
-    
-    # [FIXED: Bug B] 0.0이 Falsy로 판정되어 N/A로 찍히는 문제 해결 (명시적 is not None 체크)
-    audio_display = audio_score if audio_score is not None else "N/A"
-    para_display = paralinguistic_risk if paralinguistic_risk is not None else "N/A"
-    
-    a_val = audio_score if audio_score is not None else 0.0
-    p_val = paralinguistic_risk if paralinguistic_risk is not None else 0.0
-    
-    total_raw = (a_val * weights.get("audio", 0.0)) + (text_analysis["text_risk"] * weights.get("text", 0.0)) + (p_val * weights.get("paralinguistic", 0.0))
-    
-    if total_raw > 0:
-        a_pct = round(((a_val * weights.get("audio", 0.0)) / total_raw) * 100, 1)
-        t_pct = round(((text_analysis["text_risk"] * weights.get("text", 0.0)) / total_raw) * 100, 1)
-        p_pct = round(100.0 - (a_pct + t_pct), 1)
-    else: 
-        a_pct, t_pct, p_pct = (0.0, 50.0, 50.0) if audio_score is None else (33.3, 33.3, 33.4)
-    
+def generate_xai_report(a_score, t_risk, t_feats, p_score, fusion_res):
+    weights = fusion_res["gating_weights"]
     return {
-        "evidence": {
-            "audio_score": audio_display, 
-            "text_semantic_risk": text_analysis["text_risk"], 
-            "paralinguistic_risk": para_display, 
-            "semantic_vectors": text_analysis["features"], 
-            "conflict_distance": conflict_distance, 
-            "reliability_score": reliability_score, 
-            "dynamic_threshold": fusion_result["dynamic_threshold"]
+        "evidence_vector": {
+            "audio_risk": a_score if a_score is not None else "N/A", 
+            "text_semantic_risk": t_risk, 
+            "nonverbal_risk": p_score if p_score is not None else "N/A", 
+            "lexical_features": t_feats, 
+            "mc_dropout_variance": fusion_res["uncertainty_metrics"]["mc_epistemic_variance"]
         },
         "xai_pipeline": {
-            "step1_pre_softmax_logits": fusion_result["pre_softmax_logits"], 
-            "step2_softmax_gating_weights": weights, 
-            "step3_modality_contribution_pct": {"audio_modality_pct": f"{a_pct}%", "text_modality_pct": f"{t_pct}%", "paralinguistic_modality_pct": f"{p_pct}%"}
+            "fusion_type": "Reliability-aware Gating Fusion",
+            "proxy_explanation_weights": weights, 
+            "conflict_distance": fusion_res["uncertainty_metrics"]["tri_modal_conflict_jsd"]
         },
-        "decision": {"threat_level": fusion_result["threat_level"], "final_risk_score": fusion_result["final_risk_score"]}
+        "decision": {
+            "threat_level": fusion_res["threat_level"], 
+            "final_risk_score": fusion_res["final_risk_score"],
+            "decision_threshold": fusion_res["decision_threshold"]
+        }
     }
 
-
 # ==========================================
-# 🌐 [4. WebSocket 스트리밍용 클래스 & 워커 (Realtime Module)]
+# 🌐 [4. Endpoint & WebSocket Worker]
 # ==========================================
 class CallSession:
     def __init__(self, session_id: str):
@@ -433,245 +408,150 @@ class CallSession:
         self.is_speaking = False
         self.speech_start_time = 0.0
         self.transcript_history: List[str] = []
+        self.vad_probs: List[float] = []
 
     def reset_speech_buffer(self):
         self.speech_buffer.clear()
+        self.vad_probs.clear()
         self.is_speaking = False
         self.speech_start_time = 0.0
 
-def realtime_multimodal_worker_sync(audio_array: np.ndarray, history: List[str]) -> Dict[str, Any]:
+def realtime_multimodal_worker_sync(audio_array: np.ndarray, session: CallSession) -> Dict[str, Any]:
     result = {"text": "", "risk_score": 0.0, "threat_level": "NORMAL", "intent_detected": "None", "reasoning": ""}
     if not engine.stt_model: return result
     
-    # 1. STT 추출
-    segments, _ = engine.stt_model.transcribe(audio_array, beam_size=3, language="ko", condition_on_previous_text=False)
+    segments = list(engine.stt_model.transcribe(audio_array, beam_size=1, language="ko", condition_on_previous_text=False)[0])
     text_chunk = " ".join([s.text for s in segments]).strip()
     if not text_chunk: return result
     
-    result["text"] = text_chunk
-    history.append(text_chunk)
-    context_window = " ".join(history[-5:])
-
-    # 2. Text Pipeline
-    text_risk_score, text_confidence = 0.0, 0.5
-    if engine.slm_classifier:
-        try:
-            preds = engine.slm_classifier(context_window, top_k=None)
-            if isinstance(preds[0], list): preds = preds[0]
-            phishing_pred = next((p for p in preds if p["label"].lower() in ["label_1", "phishing", "fraud"]), None)
-            normal_pred = next((p for p in preds if p["label"].lower() in ["label_0", "normal"]), None)
-            if phishing_pred and normal_pred:
-                text_risk_score = float(phishing_pred["score"])
-                text_confidence = float(max(phishing_pred["score"], normal_pred["score"]))
-        except Exception:
-            pass
+    if segments:
+        avg_lp = np.mean([s.avg_logprob for s in segments])
+        no_speech = np.mean([getattr(s, 'no_speech_prob', 0.0) for s in segments])
+        comp_ratio = np.mean([getattr(s, 'compression_ratio', 1.0) for s in segments])
+        comp_penalty = min(1.0, 1.2 / max(comp_ratio, 1e-3))
+        t_conf = float(np.clip(np.exp(avg_lp) * (1.0 - no_speech) * comp_penalty, 0.05, 0.99))
     else:
-        lex_res = estimate_rule_guided_lexical_risk(context_window)
-        text_risk_score = lex_res["text_risk"]
+        t_conf = 0.5
+    
+    result["text"] = text_chunk
+    session.transcript_history.append(text_chunk)
+    context_window = " ".join(session.transcript_history[-5:])
 
-    # 3. Audio & Prosody Pipeline
-    calculated_snr = calculate_snr(audio_array)
-    vad_prob = 1.0  # 청크 발화 검증 통과 
-    audio_score, audio_conf = 0.0, 0.5
+    t_risk, lex_res = estimate_hybrid_semantic_risk(context_window)
+    t_semantic_prob = lex_res.get("semantic_prob", 0.5)
+    avg_vad_prob = float(np.mean(session.vad_probs)) if session.vad_probs else 1.0
+
+    signal_metrics = check_signal_quality(audio_array)
+    audio_score, audio_conf, mc_variance = 0.0, 0.5, 0.0
     
     if engine.fake_voice_detector:
-        audio_score, best_logits = analyze_audio_sliding_window(audio_array, engine.fake_voice_detector)
-        audio_conf = calculate_logit_margin_confidence_proxy(best_logits) or 0.5
+        audio_score, best_logits, mc_variance = analyze_audio_sliding_window_mcd(audio_array, engine.fake_voice_detector)
+        audio_conf = float(np.tanh(abs(best_logits[1] - best_logits[0]) / settings.logit_margin_scale_theta)) if len(best_logits) > 1 else 0.5
 
     paralinguistic_risk, prosody_conf = 0.5, 0.5
-    prosody_metrics = {"hnr_norm": 0.5, "energy_norm": 0.5}
+    prosody_metrics = {}
     prosody_valid = False
-    tmp_path = None
 
     try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-            tmp_path = tmp.name
-        
-        audio_int16 = (audio_array * 32767).astype(np.int16)
-        wav.write(tmp_path, settings.sample_rate, audio_int16)
-            
-        prosody_result = extract_paper_grade_prosody(tmp_path, text_chunk)
-        prosody_metrics = prosody_result["metrics"] 
-        prosody_valid = prosody_result["feature_valid"]
+        prosody_result = extract_paper_grade_nonverbal_features(audio_array, signal_metrics, settings.sample_rate)
+        prosody_metrics = prosody_result.get("quality_metrics", {}) 
+        prosody_valid = prosody_result.get("feature_valid", False)
         
         if prosody_valid and getattr(engine, 'prosody_classifier', None):
-            probs = engine.prosody_classifier.predict_proba([prosody_result["features"]])[0]
-            paralinguistic_risk = float(probs[1])
-            prosody_conf = float(max(probs[0], probs[1]))
-            
+            features_to_predict = prosody_result["features"]
+            if hasattr(engine.prosody_classifier, "predict_proba"):
+                probs = engine.prosody_classifier.predict_proba([features_to_predict])[0]
+                paralinguistic_risk = float(probs[1])
+                prosody_conf = float(max(probs[0], probs[1]))
+            else:
+                decision = engine.prosody_classifier.predict([features_to_predict])[0]
+                paralinguistic_risk = 0.8 if decision == 1 else 0.2
+                prosody_conf = 0.85
     except Exception as e:
-        logger.error(f"Realtime Prosody Error: {e}")
-    finally:
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
+        logger.exception(f"Realtime Non-verbal 에러 - {e}")
 
-    # 4. Multimodal Fusion 실행
-    fusion_result = reliability_aware_adaptive_fusion(
-        audio_score=audio_score, text_score=text_risk_score, paralinguistic_score=paralinguistic_risk,
-        audio_conf=audio_conf, text_conf=text_confidence, vad_prob=vad_prob, snr_db=calculated_snr,
-        prosody_metrics=prosody_metrics, prosody_valid=prosody_valid, prosody_conf=prosody_conf
+    fusion_result = reliability_aware_gating_fusion(
+        a_score=audio_score, t_score=t_risk, p_score=paralinguistic_risk,
+        a_conf=audio_conf, t_conf=t_conf, t_semantic_prob=t_semantic_prob, avg_vad_prob=avg_vad_prob, snr_db=signal_metrics["snr"], 
+        clipping_ratio=signal_metrics["clipping_ratio"],
+        p_metrics=prosody_metrics, p_valid=prosody_valid, p_conf=prosody_conf, mc_variance=mc_variance
     )
 
     result["risk_score"] = fusion_result["final_risk_score"]
     result["threat_level"] = fusion_result["threat_level"]
-    result["reasoning"] = f"Realtime Fusion (Uncertainty: {fusion_result['bivariate_mapping_state']['uncertainty']})"
-
+    result["reasoning"] = f"Uncertainty: {fusion_result['uncertainty_metrics']['system_uncertainty']} | Deferral Tau: {settings.uncertainty_deferral_tau}"
     return result
 
-
-
-# ==========================================
-# 🚀 [5. API 엔드포인트 통합 (REST + WebSocket)]
-# ==========================================
-
-# --- 1️⃣ REST API --- (실제 분석 로직 적용)
 @app.post("/analyze/pipeline")
 async def run_pipeline(file: UploadFile = File(None), text_input: str = Form(None)):
-    if not file and not text_input:
-        raise HTTPException(status_code=400, detail="오디오 파일이나 텍스트를 입력해주세요.")
-        
-    final_text = text_input or ""
-    audio_score = confidence_proxy = None
+    if not file and not text_input: raise HTTPException(status_code=400, detail="입력 누락")
     
-    # 기본값 세팅 (오디오가 없을 경우 대비)
-    paralinguistic_risk = 0.5
-    calculated_snr = 20.0
-    vad_probability = 0.8
-    prosody_metrics = {"hnr_norm": 0.5, "energy_norm": 0.5}
-    prosody_valid = False
-    tmp_path = None
+    f_text = text_input or ""
+    a_score = conf_proxy = None
+    p_risk, p_conf, p_valid, vad_prob = 0.5, 0.5, False, 0.8
+    signal_metrics = {"snr": 20.0, "clipping_ratio": 0.0, "energy_mean": settings.energy_mu_default, "energy_std": settings.energy_sigma_default}
+    p_mets = {}
+    t_conf = 0.5
+    mc_variance = 0.0
     
     try:
-        # [Step 1] 오디오 파일 처리 및 Feature 추출
         if file:
-            import tempfile
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
-                tmp.write(await file.read())
-                tmp_path = tmp.name
-                
-            audio_segment = AudioSegment.from_file(tmp_path).set_frame_rate(16000).set_channels(1)
-            samples = np.array(audio_segment.get_array_of_samples(), dtype=np.float32) / 32768.0
+            samples = np.array(AudioSegment.from_file(io.BytesIO(await file.read())).set_frame_rate(16000).set_channels(1).get_array_of_samples(), dtype=np.float32) / 32768.0
+            signal_metrics = check_signal_quality(samples)
             
-            # 1-1. 기본 오디오 Feature (SNR, VAD)
-            calculated_snr = calculate_snr(samples)
             if engine.vad_model:
-                vad_tensor = torch.from_numpy(samples).squeeze()
-                with torch.no_grad():
-                    vad_probability = engine.vad_model(vad_tensor, settings.sample_rate).item()
-
-            # 1-2. AASIST (딥페이크/음성변조 탐지)
+                with torch.no_grad(): vad_prob = engine.vad_model(torch.from_numpy(samples).squeeze(), settings.sample_rate).item()
             if engine.fake_voice_detector:
-                audio_score, best_logits = analyze_audio_sliding_window(samples, engine.fake_voice_detector)
-                confidence_proxy = calculate_logit_margin_confidence_proxy(best_logits)
+                a_score, best_logits, mc_variance = analyze_audio_sliding_window_mcd(samples, engine.fake_voice_detector)
+                conf_proxy = float(np.tanh(abs(best_logits[1] - best_logits[0]) / settings.logit_margin_scale_theta)) if len(best_logits) > 1 else 0.5
             
-            # 1-3. STT 텍스트 추출 (입력 텍스트가 없을 때)
-            if not final_text and engine.stt_model:
-                segments, _ = engine.stt_model.transcribe(samples, beam_size=3, language="ko")
-                final_text = " ".join([s.text for s in segments]).strip()
+            if not f_text and engine.stt_model:
+                segments = list(engine.stt_model.transcribe(samples, beam_size=1, language="ko")[0])
+                f_text = " ".join([s.text for s in segments]).strip()
+                if segments:
+                    avg_lp = np.mean([s.avg_logprob for s in segments])
+                    no_speech = np.mean([getattr(s, 'no_speech_prob', 0.0) for s in segments])
+                    t_conf = float(np.clip(np.exp(avg_lp) * (1.0 - no_speech), 0.05, 0.99))
             
-            # 1-4. [핵심 변경점] Prosody 추출 및 ML 기반 Risk 추론
-            # 1-4. Prosody 추출 및 ML 기반 Risk 추론
-            prosody_result = extract_paper_grade_prosody(tmp_path, final_text)
-            prosody_metrics = prosody_result["quality_metrics"] # [버그 원천 차단] 정확히 매핑
-            prosody_valid = prosody_result["feature_valid"]
-            
-            # [TO-BE]
-            if prosody_valid and getattr(engine, 'prosody_classifier', None):
-                probs = engine.prosody_classifier.predict_proba([prosody_result["features"]])[0]
-                paralinguistic_risk = float(probs[1])
-                prosody_conf = float(max(probs[0], probs[1])) # [추가] Confidence 추출
-            else:
-                paralinguistic_risk = 0.5
-            # os.remove(tmp_path) 는 여기서 삭제합니다.
-                prosody_conf = 0.5 # [이 줄을 새로 추가합니다!]
-                calculated_snr = 20.0
-                
-            os.remove(tmp_path)
+            p_res = extract_paper_grade_nonverbal_features(samples, signal_metrics, settings.sample_rate)
+            p_valid = p_res.get("feature_valid", False)
+            p_mets = p_res.get("quality_metrics", p_mets)
+            if p_valid and getattr(engine, 'prosody_classifier', None):
+                features_to_predict = p_res["features"]
+                if hasattr(engine.prosody_classifier, "predict_proba"):
+                    probs = engine.prosody_classifier.predict_proba([features_to_predict])[0]
+                    p_risk, p_conf = float(probs[1]), float(max(probs[0], probs[1]))
+                else:
+                    decision = engine.prosody_classifier.predict([features_to_predict])[0]
+                    p_risk, p_conf = (0.8 if decision == 1 else 0.2), 0.85 
 
-        # [Step 2] Text Pipeline: 정규식 대신 SLM(KoELECTRA) 추론
-        text_risk_score = 0.0
-        text_confidence = 0.0
+        t_risk, lex_res = estimate_hybrid_semantic_risk(f_text)
+        t_semantic_prob = lex_res.get("semantic_prob", 0.5)
         
-        if engine.slm_classifier:
-            preds = engine.slm_classifier(final_text, top_k=None)
-            if isinstance(preds[0], list): preds = preds[0]
-            
-            phishing_pred = next((p for p in preds if p["label"].lower() in ["label_1", "phishing", "fraud"]), None)
-            normal_pred = next((p for p in preds if p["label"].lower() in ["label_0", "normal"]), None)
-            
-            if phishing_pred and normal_pred:
-                text_risk_score = phishing_pred["score"]
-                text_confidence = max(phishing_pred["score"], normal_pred["score"])
-        else:
-            lex_res = estimate_rule_guided_lexical_risk(final_text)
-            text_risk_score = lex_res["text_risk"]
-            text_confidence = 0.5 
-
-        xai_features = estimate_rule_guided_lexical_risk(final_text)["features"]
-
-        # [Step 3] Data-driven Adaptive Fusion 호출 (JSD, SNR, VAD 모두 내부에서 처리)
-        fusion_result = reliability_aware_adaptive_fusion(
-            audio_score=audio_score,
-            text_score=text_risk_score,
-            paralinguistic_score=paralinguistic_risk,
-            audio_conf=confidence_proxy,
-            text_conf=text_confidence,
-            vad_prob=vad_probability,
-            snr_db=calculated_snr,
-            prosody_metrics=prosody_metrics, # HNR, Energy 전달
-            prosody_valid=prosody_valid,  
-            prosody_conf=prosody_conf  # 유효성 플래그 전달
+        fusion_res = reliability_aware_gating_fusion(
+            a_score, t_risk, p_risk, conf_proxy, t_conf, t_semantic_prob, vad_prob, signal_metrics["snr"], 
+            signal_metrics["clipping_ratio"], p_mets, p_valid, p_conf, mc_variance
         )
-        
-        # [Step 4] XAI 리포트 구성
-        explanation = generate_contribution_explanation(
-            audio_score=audio_score,
-            text_analysis={"text_risk": text_risk_score, "features": xai_features},
-            paralinguistic_risk=paralinguistic_risk,
-            fusion_result=fusion_result,
-            conflict_distance=fusion_result["bivariate_mapping_state"]["conflict_jsd"],
-            reliability_score=fusion_result["pre_softmax_logits"].get("audio", 0.5)
-        )
-        
-        return {
-            "status": "success",
-            "transcript": final_text,
-            "analysis_result": explanation
-        }
+        return {"status": "success", "transcript": f_text, "analysis_result": generate_xai_report(a_score, t_risk, lex_res, p_risk, fusion_res)}
         
     except Exception as e:
-        logger.error(f"Pipeline Error: {e}")
+        logger.exception(f"Pipeline Error - {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    finally:
-        # <--- [TO-BE] 무조건 여기서 한 번만 안전하게 파일 삭제
-        if tmp_path and os.path.exists(tmp_path):
-            try:
-                os.remove(tmp_path)
-            except Exception:
-                pass
 
-# --- 2️⃣ WebSocket API: [FIXED] Producer-Consumer 구조 적용 ---
 @app.websocket("/ws/detect/{session_id}")
-async def websocket_endpoint(websocket: WebSocket, session_id: str):
-    # 보안 지적사항(Issue 6) 뼈대 반영: 향후 쿼리 파라미터나 헤더 토큰 검증 로직 추가 위치
+async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str = Query(None)):
+    if token != settings.ws_api_token:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        logger.warning(f"🔒 [보안] 비인가 접속 차단: {session_id}")
+        return
+
     await websocket.accept()
     session = CallSession(session_id=session_id)
-    
-    # Producer-Consumer 분리를 위한 오디오 청크 큐
-    audio_queue = asyncio.Queue()
+    audio_queue = asyncio.Queue(maxsize=50)
     
     logger.info(f"🔌 [WebSocket 연결] 세션 시작: {session_id}")
-    await websocket.send_json({
-        "event": "CONNECTION_ESTABLISHED", "session_id": session_id,
-        "system_status": "DEGRADED" if engine.system_degraded else "HEALTHY"
-    })
-
     chunk_size_bytes = int(settings.sample_rate * 2 * (settings.chunk_duration_ms / 1000.0))
 
-    # [Task 1] Consumer: 큐에서 꺼내와서 VAD 검사 및 STT 추론 스레드 위임
     async def process_audio():
         audio_buffer = bytearray()
         try:
@@ -685,14 +565,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                     
                     pcm_data = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
                     
+                    speech_prob = 1.0
                     is_speech = False
                     if engine.vad_model:
-                        vad_tensor = torch.from_numpy(pcm_data).squeeze()
                         with torch.no_grad():
-                            speech_prob = engine.vad_model(vad_tensor, settings.sample_rate).item()
+                            speech_prob = engine.vad_model(torch.from_numpy(pcm_data).squeeze(), settings.sample_rate).item()
                         is_speech = speech_prob >= settings.vad_threshold
                     else: 
-                        is_speech = True # VAD 실패시 폴백
+                        is_speech = True 
 
                     current_time = time.time()
                     
@@ -701,6 +581,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             session.is_speaking = True
                             session.speech_start_time = current_time
                         session.speech_buffer.append(pcm_data)
+                        session.vad_probs.append(speech_prob)
                         
                         if (current_time - session.speech_start_time) >= settings.max_speech_duration_s:
                             is_speech = False
@@ -710,8 +591,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                         if speech_duration >= settings.min_speech_duration_s:
                             full_speech_array = np.concatenate(session.speech_buffer)
                             
-                            # 비동기 스레드 위임으로 메인 이벤트 루프 블로킹 방지
-                            ml_result = await asyncio.to_thread(realtime_multimodal_worker_sync, full_speech_array, session.transcript_history)
+                            ml_result = await asyncio.to_thread(
+                                realtime_multimodal_worker_sync, 
+                                full_speech_array, 
+                                session
+                            )
 
                             if ml_result["text"]:
                                 await websocket.send_json({
@@ -723,13 +607,20 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 audio_queue.task_done()
         except asyncio.CancelledError:
             pass
+        except Exception as e:
+            logger.exception(f"WebSocket Processing Error - {e}")
 
     processor_task = asyncio.create_task(process_audio())
 
-    # [Task 2] Producer: 클라이언트로부터 쉴 새 없이 네트워크 패킷만 수신하여 큐에 적재 (직렬화 병목 해소)
     try:
         while True:
             data = await websocket.receive_bytes()
+            if audio_queue.full():
+                try:
+                    audio_queue.get_nowait()
+                    logger.warning("Queue Full: Oldest frame discarded.")
+                except asyncio.QueueEmpty:
+                    pass
             await audio_queue.put(data)
     except WebSocketDisconnect:
         logger.info(f"🔌 [WebSocket 종료] 클라이언트 해제: {session_id}")
