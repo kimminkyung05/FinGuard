@@ -20,8 +20,8 @@ import torch.nn as nn
 from PIL import Image as pil_image
 from tqdm import tqdm
 
-from network.models import model_selection
-from dataset.transform import xception_default_data_transforms
+from video.classification.network.models import model_selection
+from video.classification.dataset.transform import xception_default_data_transforms
 
 
 def get_boundingbox(face, width, height, scale=1.3, minsize=None):
@@ -132,11 +132,11 @@ def test_full_image_network(video_path, model_path, output_path,
     face_detector = dlib.get_frontal_face_detector()
 
     # Load model
-    model, *_ = model_selection(modelname='xception', num_out_classes=2)
     if model_path is not None:
-        model = torch.load(model_path)
+        model = torch.load(model_path, map_location='cpu')
         print('Model found in {}'.format(model_path))
     else:
+        model, *_ = model_selection(modelname='xception', num_out_classes=2)
         print('No model found, initializing random model.')
     if cuda:
         model = model.cuda()
