@@ -25,9 +25,4 @@ outputs/
 *.mp4
 
 # Model checkpoints and local configuration
-*.pth
-*.pt
-*.p
-.env
-.env.*
 video/sample1.mp4
