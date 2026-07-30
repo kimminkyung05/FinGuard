@@ -1,62 +1,83 @@
-"""JSON-safe output contract for financial-service consumers."""
+"""JSON-safe, modality-ready output contract for inference consumers."""
 
 import json
+import os
 import uuid
 from datetime import datetime, timezone
 
+from .risk import get_thresholds
+
 
 def _number(value, default=0.0):
-    """Convert numeric-like values, including NumPy scalars, to Python values."""
     try:
-        converted = value.item()
+        value = value.item()
     except AttributeError:
-        converted = value
+        pass
     try:
-        return float(converted)
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _integer(value, default=0):
+    try:
+        return int(value)
     except (TypeError, ValueError):
         return default
 
 
 def build_output(aggregation, confidence, risk, total_frames, valid_frames,
-                 face_detected_frames, blur_score, brightness_score,
-                 processing_time_ms, model_name="Xception", model_version="1.0.0"):
-    """Build the stable, serializable result payload."""
+                 face_detected_frames, blur_score=None, brightness_score=None,
+                 processing_time_ms=0, model_name="Xception", model_version="v1.0",
+                 input_path=None, annotated_video_path=None, status="SUCCESS",
+                 source_total_frames=None):
+    """Build a stable video result that can later carry audio/fusion scores."""
+    video_fake_score = _number(aggregation.get("video_fake_score"))
+    confidence_score = _number(confidence.get("confidence_score"))
+    risk_score = _number(risk.get("risk_score"))
+    statistics = dict(aggregation.get("statistics", {}))
+    components = dict(confidence.get("components", {}))
     return {
         "request_id": str(uuid.uuid4()),
         "timestamp": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "result": {
-            "risk_score": int(risk["risk_score"]),
-            "risk_level": risk["risk_level"],
-            "confidence_score": _number(confidence["confidence_score"]),
-            "confidence_level": confidence["confidence_level"],
-            "decision": risk["decision"],
+        "input": {
+            "input_type": "video",
+            "input_path": input_path,
+            "file_name": os.path.basename(input_path) if input_path else None,
         },
-        "analysis": {
-            "video_fake_score": _number(aggregation["video_fake_score"]),
-            "mean_frame_score": _number(aggregation["mean_score"]),
-            "median_frame_score": _number(aggregation["median_score"]),
-            "max_frame_score": _number(aggregation["max_score"]),
-            "score_std": _number(aggregation["score_std"]),
-            "high_risk_frame_ratio": _number(aggregation["high_risk_frame_ratio"]),
+        "scores": {
+            "video_fake_score": video_fake_score,
+            "video_fake_percent": video_fake_score * 100.0,
+            "confidence_score": confidence_score,
+            "confidence_percent": confidence_score * 100.0,
+            # Reserved for future audio and multimodal score producers.
+            "audio_fake_score": None,
+            "conversation_risk_score": None,
+        },
+        "risk": {
+            "risk_score": risk_score,
+            "risk_percent": risk_score * 100.0,
+            "risk_level": risk.get("risk_level", "UNDETERMINED"),
+            "decision": risk.get("decision", "RETRY"),
+            "reason_codes": list(risk.get("reason_codes", [])),
+        },
+        "frame_analysis": {
+            "total_frames": _integer(source_total_frames, _integer(total_frames)),
+            "analyzed_frames": _integer(total_frames),
+            "valid_face_frames": _integer(valid_frames),
+            "statistics": {key: _number(value) for key, value in statistics.items()},
         },
         "quality": {
-            "total_frames": int(total_frames),
-            "valid_frames": int(valid_frames),
-            "face_detected_frames": int(face_detected_frames),
-            "face_detection_ratio": _number(confidence["face_detection_ratio"]),
-            "blur_score": _number(blur_score),
-            "brightness_score": _number(brightness_score),
+            "components": {key: _number(value) for key, value in components.items()},
+            "quality_flags": list(confidence.get("quality_flags", [])),
         },
-        "explanation": {
-            "reason_codes": list(risk["reason_codes"]),
-            "reasons": list(risk["reasons"]),
-            "confidence_reasons": list(confidence["confidence_reasons"]),
-        },
-        "processing": {"processing_time_ms": int(processing_time_ms)},
-        "model": {"name": model_name, "version": model_version},
+        "thresholds": get_thresholds(),
+        "model_info": {"model_name": model_name, "model_version": model_version},
+        "processing": {"processing_time_ms": _integer(processing_time_ms), "status": status},
+        "artifacts": {"annotated_video_path": annotated_video_path},
     }
 
 
 def dumps_output(payload):
     """Serialize a payload created by :func:`build_output` to JSON."""
-    return json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    return json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2)

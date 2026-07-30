@@ -1,0 +1,1 @@
+"""FaceForensics FastAPI application package."""

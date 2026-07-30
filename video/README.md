@@ -1,81 +1,72 @@
-# FaceForensics++: Learning to Detect Manipulated Facial Images
+# 영상 딥페이크 위험도 분석 파이프라인
 
-![Header](images/teaser.png)
+이 프로젝트는 Windows 시스템 Python 3.13에서 실행합니다. Miniconda, dlib,
+CMake, 별도 가상환경을 사용하지 않습니다.
 
-## Overview
-FaceForensics++ is a forensics dataset consisting of 1000 original video sequences that have been manipulated with four automated face manipulation methods: Deepfakes, Face2Face, FaceSwap and NeuralTextures. The data has been sourced from 977 youtube videos and all videos contain a trackable mostly frontal face without occlusions which enables automated tampering methods to generate realistic forgeries. As we provide binary masks the data can be used for image and video classification as well as segmentation. In addition, we provide 1000 Deepfakes models to generate and augment new data.
+## 설치
 
-
-
-For more information, please consult [our updated paper](https://arxiv.org/abs/1901.08971).
-
-## Server Status
-After a power outage, our EU servers are up again. Unfortunately, we are still have some issues with the Canadian server (CA). Please use the EU hosts (EU, EU2) for now until we resolve the issue and remove this message.
-
-## What is new
-
-- __[FaceShifter](https://lingzhili.com/FaceShifterPage/):__
-We are including the two-stage FaceShifter face swapping method that has been published in CVPR2020. It is able to generate high fidelity identity preserving face swap results and, in comparison to our previous methods, deal with facial occlusions using a second synthesis stage consisting of a Heuristic Error Acknowledging Refinement Network (HEAR-Net). All 1000 original videos of the original youtube based dataset have been manipulated. Please check them out on [their project page](https://lingzhili.com/FaceShifterPage/) for more information! See its [dataset page](dataset/FaceShifter/README.md) for updated numbers as well as an example video.
-If you want to access the new data and have already applied for our download script, simply reuse the original download link to get the updated script. Otherwise, please fill out [this google form](https://docs.google.com/forms/d/e/1FAIpQLSdRRR3L5zAv6tQ_CKxmK4W96tAab_pfBu2EKAgQbeDVhmXagg/viewform) and, once accepted, we will send you the link to our download script.
-
-<p align="center">
-  <img width="460" height="300" src="images/DDD_samples.gif">
-</p>
-
-- __[Deep Fake Detection Dataset](https://ai.googleblog.com/2019/09/contributing-data-to-deepfake-detection.html):__ We are hosting the Deep Fake Detection Dataset provided by Google & JigSaw. The dataset contains over 3000 manipulated videos from 28 actors in various scenes. The dataset has a similar file structure and is downloaded by default together with the regular dataset. See the [dataset](dataset) page for more information. 
-
-- __Neural Textures:__ We included a fourth manipulation method that does face manipulation using GANs and [Neural Textures](https://arxiv.org/pdf/1904.12356.pdf). All results have been updated to incorporate the new manipulation method and we have updated the benchmark as well. We refer to the paper for more information.
-Unfortunately, we won't continue support on the old benchmark after this update, though you can still submit your models to the new benchmark by creating a new submission.
-
-## Access
-If you would like to download the FaceForensics++ dataset, please fill out [this google form](https://docs.google.com/forms/d/e/1FAIpQLSdRRR3L5zAv6tQ_CKxmK4W96tAab_pfBu2EKAgQbeDVhmXagg/viewform) and, once accepted, we will send you the link to our download script.
-
-If you have not received a response within a week, it is likely that your email is bouncing - please check this before sending repeat requests.
-
-Once, you obtain the download link, please head to the [download section](dataset/README.md). You can also find details about the generation of the dataset there.
-
-## [Benchmark](http://kaldir.vc.in.tum.de/faceforensics_benchmark/)
-We are offering an [automated benchmark](http://kaldir.vc.in.tum.de/faceforensics_benchmark/) for facial manipulation detection on the presence of compression based on our manipulation methods that contains 1000 images. If you are interested to test your approach on unseen data, check it out! For more information, please consult [our paper](https://arxiv.org/abs/1901.08971). You can download the benchmark images [here](http://kaldir.vc.in.tum.de/faceforensics_benchmark_images.zip).
-
-
-## Original FaceForensics
-You can view the original FaceForensics github [here](https://github.com/ondyari/FaceForensics/tree/original). Any request to this dataset will also contain the download link to the original version of our dataset. 
-
-
-## Citation
-If you use the FaceForensics++ data or code please cite:
+```powershell
+python --version
+python -m pip install -r requirements.txt
 ```
-@inproceedings{roessler2019faceforensicspp,
-	author = {Andreas R\"ossler and Davide Cozzolino and Luisa Verdoliva and Christian Riess and Justus Thies and Matthias Nie{\ss}ner},
-	title = {Face{F}orensics++: Learning to Detect Manipulated Facial Images},
-	booktitle= {International Conference on Computer Vision (ICCV)},
-	year = {2019}
+
+`Python 3.13.x`가 출력되는지 확인하세요. Jupyter에서는
+`FaceForensics (Python 3.13)` 커널을 선택합니다.
+
+## 실행
+
+```powershell
+python -m video.classification.detect_from_video `
+  --video_path video\sample1.mp4 `
+  --model_path video\face_detection\xception\all_c23.p `
+  --output_path outputs\xception_inference
+```
+
+OpenCV의 기본 Haar Cascade가 가장 큰 얼굴을 검출하고, margin을 적용해 crop한 뒤
+기존 Xception checkpoint로 프레임별 fake score를 계산합니다. 결과 폴더에는 annotated
+AVI와 금융권 연동용 JSON이 생성됩니다. AVI가 필요 없으면
+`--no_save_annotated_video`를 추가하세요.
+
+## FastAPI 영상 분석 API
+
+서버를 실행합니다.
+
+```powershell
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+브라우저에서 Swagger UI를 엽니다.
+
+```text
+http://127.0.0.1:8000/docs
+```
+
+`POST /video/analyze`를 열고 **Try it out**을 누른 뒤, `file` 항목에 영상을
+선택하여 실행합니다. `.mp4`, `.avi`, `.mov`, `.mkv` 파일을 지원합니다.
+
+업로드된 영상은 임시 경로에 저장된 뒤 기존 Xception 영상 추론 CLI로 처리됩니다.
+성공하면 생성된 JSON 결과를 그대로 반환하며, 최상위 `status`는 `success`입니다.
+
+응답에는 다음 점수가 포함됩니다.
+
+```json
+{
+  "status": "success",
+  "scores": {
+    "video_fake_score": 0.9325,
+    "confidence_score": 0.7810
+  }
 }
-
 ```
 
-## Help
-If you have any questions, please contact us at [faceforensics@googlegroups.com](faceforensics@googlegroups.com).
+간단한 상태 확인은 다음 주소를 사용합니다.
 
-## Video
-Please view our youtube video [here](https://www.youtube.com/watch?v=x2g48Q2I2ZQ).
+```text
+GET http://127.0.0.1:8000/health
+```
 
-[![youtubev_video](https://img.youtube.com/vi/x2g48Q2I2ZQ/0.jpg)](https://www.youtube.com/watch?v=x2g48Q2I2ZQ)
+## 주의 사항
 
-## Changelog
-15.07.2020: Added FaceShifter
-
-23.09.2019: Added sample videos as well as the Deep Fake Detection Dataset
-
-30.08.2019: Paper got accepted to ICCV 2019! Updated the download script to include NeuralTextures and changed instructions
-
-06.04.2019: Updated sample and added benchmark
-
-02.04.2019: Updated our arxiv paper, switched to google forms, release of dataset generation methods and added a classification sample
-
-25.01.2019: Release of FaceForensics++
-
-## License
-The data is released under the [FaceForensics Terms of Use](http://kaldir.vc.in.tum.de/faceforensics_tos.pdf), and the code is released under the MIT license.
-
-Copyright (c) 2019
+`all_c23.p`는 구형 PyTorch에서 저장된 신뢰된 로컬 모델 객체입니다. 최신 PyTorch에서
+호환 로딩을 위해 `weights_only=False`와 기존 `network.*` 모듈 경로 alias를 사용합니다.
+출처를 신뢰할 수 없는 checkpoint에는 사용하면 안 됩니다.

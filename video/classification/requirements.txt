@@ -1,31 +1,14 @@
---find-links https://download.pytorch.org/whl/cpu/torch_stable.html
-
-absl-py==0.4.0
-astor==0.7.1
-certifi==2018.11.29
-cffi==1.12.1
-cmake==3.22.6
-dlib==19.15.0
-ffmpy==0.2.2
-gast==0.2.0
-grpcio==1.14.1
-h5py==2.8.0
-Keras==2.2.0
-Markdown==2.6.11
-# These were Conda-specific acceleration packages and do not have compatible PyPI wheels.
-munch==2.3.2
-numpy==1.16.2
-nvidia-ml-py3==7.352.0
-olefile==0.46
-opencv-python==3.4.1.15
-pathlib==1.0.1
-Pillow==5.4.1
-pretrainedmodels==0.7.4
-protobuf==3.6.1
-pycparser==2.19
-scandir==1.7
-six==1.12.0
-termcolor==1.1.0
-torch==1.0.1
-torchvision==0.2.1
-tqdm==4.25.0
+# Windows system Python 3.13 runtime (no Conda, dlib, or virtual environment).
+numpy>=2.0,<3.0
+opencv-python>=4.10,<5.0
+Pillow>=10.0
+tqdm>=4.66
+matplotlib>=3.8
+scikit-image>=0.23
+scikit-learn>=1.5
+ipykernel>=6.29
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-multipart>=0.0.9
+torch
+torchvision

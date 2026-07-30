@@ -7,7 +7,6 @@ import argparse
 
 
 import torch
-import pretrainedmodels
 import torch.nn as nn
 import torch.nn.functional as F
 from video.classification.network.xception import xception

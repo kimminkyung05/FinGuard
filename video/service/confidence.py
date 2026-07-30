@@ -6,21 +6,27 @@ import math
 
 
 MINIMUM_FRAME_COUNT = 30
-LOW_CONFIDENCE_THRESHOLD = 60
-HIGH_CONFIDENCE_THRESHOLD = 80
-MAX_ACCEPTABLE_BLUR = 1.0
-IDEAL_BRIGHTNESS = 0.5
+LOW_FACE_DETECTION_RATE = 0.60
+LOW_VALID_FRAME_RATIO = 0.60
+MIN_SHARPNESS_SCORE = 0.60
+TOO_DARK_THRESHOLD = 0.20
+TOO_BRIGHT_THRESHOLD = 0.80
 MAX_PREDICTION_STD = 0.30
+MIN_PREDICTION_CONSISTENCY = 0.60
+
+
+def _bounded(value, default=0.0):
+    try:
+        return min(1.0, max(0.0, float(value)))
+    except (TypeError, ValueError):
+        return default
 
 
 def _ratio(numerator, denominator):
-    """Safely calculate a ratio in the range [0, 1]."""
-    if denominator <= 0:
-        return 0.0
-    return min(1.0, max(0.0, float(numerator) / denominator))
+    return 0.0 if denominator <= 0 else _bounded(float(numerator) / denominator)
 
 
-def _score_std(frame_scores):
+def _prediction_consistency(frame_scores):
     values = []
     for score in frame_scores or []:
         try:
@@ -28,67 +34,55 @@ def _score_std(frame_scores):
         except (TypeError, ValueError):
             continue
         if math.isfinite(value):
-            values.append(min(1.0, max(0.0, value)))
+            values.append(_bounded(value))
     if len(values) < 2:
-        return None
-    mean_value = sum(values) / len(values)
-    return math.sqrt(sum((value - mean_value) ** 2 for value in values) / len(values))
+        return 0.0
+    mean_score = sum(values) / len(values)
+    std_score = math.sqrt(sum((value - mean_score) ** 2 for value in values) / len(values))
+    return _bounded(1.0 - (std_score / MAX_PREDICTION_STD))
 
 
 def calculate_confidence(total_frames, valid_frames, face_detected_frames,
                          frame_scores, blur_score, brightness_score):
-    """Return confidence independently from the model's fake probability.
+    """Return an independent, normalized analysis-confidence assessment.
 
-    Blur is expected on a 0 (sharp) to 1 (very blurry) scale. Brightness is
-    expected on a 0 (dark) to 1 (bright) scale, with 0.5 being ideal.
+    ``blur_score`` is 0 for sharp and 1 for blurry; therefore the returned
+    ``sharpness_score`` is its inverse. Confidence never changes fake risk.
     """
     total_frames = max(0, int(total_frames or 0))
     valid_frames = min(total_frames, max(0, int(valid_frames or 0)))
     face_detected_frames = min(total_frames, max(0, int(face_detected_frames or 0)))
-    face_ratio = _ratio(face_detected_frames, total_frames)
-    valid_ratio = _ratio(valid_frames, total_frames)
-    frame_quality = min(1.0, total_frames / float(MINIMUM_FRAME_COUNT))
-    blur = min(MAX_ACCEPTABLE_BLUR, max(0.0, float(blur_score or 0.0)))
-    blur_quality = 1.0 - (blur / MAX_ACCEPTABLE_BLUR)
-    brightness = min(1.0, max(0.0, float(brightness_score or 0.0)))
-    brightness_quality = max(0.0, 1.0 - abs(brightness - IDEAL_BRIGHTNESS) / IDEAL_BRIGHTNESS)
-    prediction_std = _score_std(frame_scores)
-    consistency_quality = 0.0 if prediction_std is None else max(
-        0.0, 1.0 - prediction_std / MAX_PREDICTION_STD)
-
-    confidence_score = round(100.0 * (
-        face_ratio * 0.25 + valid_ratio * 0.20 + frame_quality * 0.15 +
-        blur_quality * 0.15 + brightness_quality * 0.10 + consistency_quality * 0.15
-    ), 2)
-
-    reasons = []
-    if total_frames == 0:
-        reasons.append("No frames were available for analysis.")
-    if face_ratio < 0.60:
-        reasons.append("Face detection rate is below 60%.")
-    if valid_ratio < 0.60:
-        reasons.append("Valid frame rate is below 60%.")
-    if total_frames < MINIMUM_FRAME_COUNT:
-        reasons.append("Fewer than {0} frames were analysed.".format(MINIMUM_FRAME_COUNT))
-    if blur_quality < 0.60:
-        reasons.append("Video quality is reduced by blur.")
-    if brightness_quality < 0.60:
-        reasons.append("Video brightness is outside the preferred range.")
-    if prediction_std is None:
-        reasons.append("Prediction consistency cannot be measured.")
-    elif prediction_std > MAX_PREDICTION_STD:
-        reasons.append("Frame predictions are inconsistent.")
-
-    if confidence_score < LOW_CONFIDENCE_THRESHOLD:
-        level = "LOW"
-    elif confidence_score < HIGH_CONFIDENCE_THRESHOLD:
-        level = "MEDIUM"
-    else:
-        level = "HIGH"
+    components = {
+        "face_detection_rate": _ratio(face_detected_frames, total_frames),
+        "valid_frame_ratio": _ratio(valid_frames, total_frames),
+        "sharpness_score": 1.0 - _bounded(blur_score),
+        "brightness_score": _bounded(brightness_score),
+        "prediction_consistency": _prediction_consistency(frame_scores),
+    }
+    frame_count_score = _bounded(total_frames / float(MINIMUM_FRAME_COUNT))
+    confidence_score = sum((
+        components["face_detection_rate"] * 0.25,
+        components["valid_frame_ratio"] * 0.20,
+        frame_count_score * 0.15,
+        components["sharpness_score"] * 0.15,
+        (1.0 - abs(components["brightness_score"] - 0.5) / 0.5) * 0.10,
+        components["prediction_consistency"] * 0.15,
+    ))
+    flags = []
+    if components["face_detection_rate"] < LOW_FACE_DETECTION_RATE:
+        flags.append("LOW_FACE_DETECTION_RATE")
+    if components["valid_frame_ratio"] < LOW_VALID_FRAME_RATIO or total_frames < MINIMUM_FRAME_COUNT:
+        flags.append("INSUFFICIENT_VALID_FRAMES")
+    if components["sharpness_score"] < MIN_SHARPNESS_SCORE:
+        flags.append("BLURRY_VIDEO")
+    if components["brightness_score"] < TOO_DARK_THRESHOLD:
+        flags.append("TOO_DARK")
+    elif components["brightness_score"] > TOO_BRIGHT_THRESHOLD:
+        flags.append("TOO_BRIGHT")
+    if components["prediction_consistency"] < MIN_PREDICTION_CONSISTENCY:
+        flags.append("INCONSISTENT_PREDICTIONS")
     return {
-        "confidence_score": confidence_score,
-        "confidence_level": level,
-        "confidence_reasons": reasons,
-        "face_detection_ratio": face_ratio,
-        "prediction_std": prediction_std,
+        "confidence_score": _bounded(confidence_score),
+        "components": components,
+        "quality_flags": flags,
     }

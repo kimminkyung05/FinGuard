@@ -3,10 +3,10 @@
 import json
 import unittest
 
-from video.service.aggregation import aggregate_frame_scores
-from video.service.confidence import calculate_confidence
-from video.service.output import build_output, dumps_output
-from video.service.risk import assess_risk
+from DeepFake.video.service.aggregation import aggregate_frame_scores
+from DeepFake.video.service.confidence import calculate_confidence
+from DeepFake.video.service.output import build_output, dumps_output
+from DeepFake.video.service.risk import assess_risk
 
 
 class VideoServiceTest(unittest.TestCase):
@@ -52,7 +52,7 @@ class VideoServiceTest(unittest.TestCase):
         risk = assess_risk(aggregation["video_fake_score"], confidence["confidence_score"])
         payload = build_output(aggregation, confidence, risk, 100, 100, 100, 0.1, 0.5, 642)
         decoded = json.loads(dumps_output(payload))
-        self.assertEqual("BLOCK", decoded["result"]["decision"])
+        self.assertEqual("BLOCK", decoded["risk"]["decision"])
 
 
 if __name__ == "__main__":
