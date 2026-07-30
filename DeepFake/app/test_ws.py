@@ -87,6 +87,25 @@ aasist_path = r"C:\Users\woori\FinGuard\voice\aasist"
 deepfake_base_path = r"C:\Users\woori\FinGuard\DeepFake"
 video_network_path = r"C:\Users\woori\FinGuard\DeepFake\video\classification\network"
 
+# ⚠️ 3개의 경로를 모두 세팅합니다.
+deepfake_base_path = r"C:\Users\woori\FinGuard\DeepFake"
+video_classification_path = r"C:\Users\woori\FinGuard\DeepFake\video\classification"
+video_network_path = r"C:\Users\woori\FinGuard\DeepFake\video\classification\network"
+
+VideoXceptionFactory = None
+try:
+    # .p 파일이 기억하는 패키지 구조(video, network.models 등)를 모두 찾을 수 있게 전부 등록합니다.
+    if deepfake_base_path not in sys.path:
+        sys.path.append(deepfake_base_path)
+    if video_classification_path not in sys.path:
+        sys.path.append(video_classification_path)
+    if video_network_path not in sys.path:
+        sys.path.append(video_network_path)
+        
+    from xception import xception as VideoXceptionFactory
+except Exception as e:
+    logger.warning(f"⚠️ [Xception 모듈 import 실패] {e}")
+    VideoXceptionFactory = None
 # ---------------------------------------------------------------------
 # ⚠️ 핵심 수정: aasist 쪽 "models" 패키지와 DeepFake 쪽 "models" 패키지가
 # 이름이 같아서 sys.path에 둘 다 올리면 나중에 import하는 쪽이 깨집니다.
@@ -184,31 +203,62 @@ class GlobalModelEngine:
         logger.info("🤖 [엔진 초기화] 영상 딥페이크 탐지 모델 로딩 시작...")
         if VideoXceptionFactory is not None:
             try:
-                # pretrained=False로 불러오면 BatchNorm 통계까지 완전 랜덤이라
-                # 입력이 달라도 출력이 사실상 고정되는 문제가 생깁니다.
-                # -> 백본은 pretrained=True(imagenet)로 정상 로드하고,
-                #    마지막 분류 head만 2-class로 교체합니다.
                 try:
                     self.video_model = VideoXceptionFactory(num_classes=2)
-                except (AssertionError, TypeError):
-                    self.video_model = VideoXceptionFactory(num_classes=1000, pretrained=True)
+                except Exception:
+                    try:
+                        self.video_model = VideoXceptionFactory(num_classes=1000, pretrained=False)
+                    except Exception:
+                        self.video_model = VideoXceptionFactory(num_classes=1000)
+
                     if hasattr(self.video_model, "fc"):
                         in_features = self.video_model.fc.in_features
                         self.video_model.fc = nn.Linear(in_features, 2)
                     elif hasattr(self.video_model, "last_linear"):
                         in_features = self.video_model.last_linear.in_features
                         self.video_model.last_linear = nn.Linear(in_features, 2)
+
+                video_weights_path = r"C:\Users\woori\FinGuard\DeepFake\video\face_detection\xception\all_c23.p"
+
+                if os.path.exists(video_weights_path):
+                    try:
+                        # 1. 파일 로드
+                        try:
+                            loaded_data = torch.load(video_weights_path, map_location="cpu", weights_only=False)
+                        except TypeError:
+                            loaded_data = torch.load(video_weights_path, map_location="cpu")
+
+                        # 2. 객체냐 딕셔너리냐에 따라 깔끔하게 분기 처리
+                        if isinstance(loaded_data, dict):
+                            if "model" in loaded_data:
+                                state_dict = loaded_data["model"]
+                            elif "state_dict" in loaded_data:
+                                state_dict = loaded_data["state_dict"]
+                            else:
+                                state_dict = loaded_data
+                            self.video_model.load_state_dict(state_dict, strict=False)
+                        else:
+                            # ⚠️ 핵심 해결: 통째로 저장된 모델 객체라면 억지로 빼지 말고 모델 자체를 덮어씌움!
+                            self.video_model = loaded_data
+                            
+                        logger.info("✅ [Video AI] 비디오 딥페이크 가중치(all_c23.p) 로딩 성공!")
+                    except Exception as load_err:
+                        logger.warning(f"⚠️ [Video AI] 가중치 로딩 실패: {load_err}")
+                else:
+                    logger.warning(f"⚠️ [Video AI] 가중치 파일을 찾을 수 없습니다: {video_weights_path}")
+
                 self.video_transform = transforms.Compose([
                     transforms.Resize((299, 299)),
                     transforms.ToTensor(),
                     transforms.Normalize([0.5] * 3, [0.5] * 3)
                 ])
+                
                 self.video_model.to(TORCH_DEVICE)
                 self.video_model.eval()
-                logger.info("✅ [Video AI] 비디오 모델 로딩 성공!")
             except Exception as e:
-                logger.warning(f"⚠️ [Video AI] 로딩 경고 (무시됨): {e}")
+                logger.info(f"ℹ️ [Video AI] 로딩 예외 발생 ({e}) - 더미 점수 모드로 동작")
                 self.video_model = None
+                self.video_transform = None
         else:
             logger.warning("⚠️ [Video AI] xception 모듈 없음 - 비디오는 더미 점수로 동작")
 
@@ -226,7 +276,17 @@ async def health_check():
         "video": engine.video_model is not None,
     }
 
-
+@app.get("/all_23p")
+async def get_all_23p():
+    """
+    팀원이 스웨거에서 확인하려는 all_23p 엔드포인트
+    """
+    return {
+        "status": "success",
+        "endpoint": "all_23p",
+        "message": "all_23p 라우트가 정상적으로 연결되었습니다."
+    }
+    
 def check_signal_quality(audio_samples: np.ndarray) -> dict:
     if len(audio_samples) < 1600:
         return {"snr": 20.0, "clipping_ratio": 0.0}
