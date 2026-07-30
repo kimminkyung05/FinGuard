@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>실시간 멀티모달 딥페이크 및 피싱 탐지</title>
+    <!-- KB 폰트 느낌을 주기 위해 깔끔하고 둥근 Noto Sans KR 적용 -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --kb-yellow: #ffcc00;
+            --kb-gray: #555555;
+            --bg-blue: #e3f0fb;
+        }
+        body { 
+            text-align: center; 
+            /* KB 전용 폰트가 기기에 있으면 먼저 적용, 없으면 Noto Sans KR */
+            font-family: 'KBFGText', 'KB금융표준체', 'Noto Sans KR', sans-serif; 
+            background-color: var(--bg-blue); 
+            margin: 0; 
+            padding: 20px; 
+            color: #333;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 20px;
+            gap: 20px;
+        }
+        .header-text {
+            text-align: left; /* 사진과 어울리게 다시 좌측 정렬 */
+            max-width: 600px;
+        }
+        .header-text h1 {
+            font-size: 32px;
+            margin: 0 0 10px 0;
+            color: #2c3e50;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .header-text p {
+            font-size: 15px;
+            color: #555;
+            line-height: 1.5;
+            margin: 0;
+        }
+        /* 다시 추가된 캐릭터 사진 CSS */
+        .header-img {
+            height: 150px;
+            object-fit: contain;
+        }
+        
+        button { 
+            padding: 15px 40px; 
+            font-size: 22px; 
+            font-weight: 900; 
+            cursor: pointer; 
+            border: none; 
+            border-radius: 30px; 
+            background-color: var(--kb-yellow); 
+            color: #333; 
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            transition: 0.2s; 
+            margin-bottom: 20px;
+        }
+        button:hover { background-color: #e6b800; transform: scale(1.05); }
+        button.stop { background-color: #dc3545; color: white; }
+        button.stop:hover { background-color: #a71d2a; }
+
+        .video-container {
+            display: flex;
+            justify-content: center;
+            margin-bottom: 20px;
+        }
+        video { 
+            background: #000; 
+            border: 5px solid #fff; 
+            border-radius: 15px; 
+            box-shadow: 0 8px 15px rgba(0,0,0,0.1);
+            width: 100%; 
+            max-width: 480px; 
+        }
+        canvas { display: none; }
+
+        /* 4가지 분석 결과 카드 레이아웃 */
+        .grid-container {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .card {
+            background: #fff;
+            border-radius: 15px;
+            padding: 15px;
+            width: 220px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.05);
+            position: relative;
+            transition: all 0.3s ease;
+            opacity: 0.6; /* 기본은 흐리게 */
+            border: 4px solid transparent;
+        }
+        .card.active {
+            opacity: 1;
+            transform: scale(1.05);
+            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+        }
+        
+        /* 각 카드별 색상 (테두리 및 강조) */
+        .card-00.active { border-color: #ffd700; background-color: #fffde7; } /* 노랑/초록 느낌 */
+        .card-01.active { border-color: #ffa500; background-color: #fff3e0; } /* 주황 */
+        .card-10.active { border-color: #87ceeb; background-color: #e1f5fe; } /* 파랑 */
+        .card-11.active { border-color: #ff9999; background-color: #ffebee; } /* 빨강 */
+
+        .card-title { font-size: 14px; font-weight: bold; margin-bottom: 5px; }
+        .card-subtitle { font-size: 12px; color: #666; margin-bottom: 10px; }
+        
+        .card-content {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .icon { font-size: 30px; font-weight: bold; }
+        .icon.check { color: #28a745; }
+        .icon.cross { color: #dc3545; }
+        
+        .card-snapshot {
+            width: 100px;
+            height: 75px;
+            background: #ccc;
+            border-radius: 8px;
+            object-fit: cover;
+        }
+        .card-scores { font-size: 11px; color: #333; margin-top: 10px; line-height: 1.4; }
+
+        .current-badge {
+            display: none;
+            position: absolute;
+            top: -12px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: #ffcc00;
+            color: #333;
+            font-size: 12px;
+            font-weight: bold;
+            padding: 3px 10px;
+            border-radius: 10px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+        }
+        .card.active .current-badge { display: block; }
+
+        /* 하단 최종 결과 바 */
+        .bottom-bar {
+            background: #fff;
+            border-radius: 15px;
+            padding: 15px 25px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            max-width: 950px;
+            margin: 0 auto;
+        }
+        .info-item { text-align: left; }
+        .info-title { font-size: 14px; color: #777; font-weight: bold; margin-bottom: 5px; display: flex; align-items: center; gap: 5px;}
+        .info-value { font-size: 18px; font-weight: 900; color: #333; }
+        
+        .final-decision { font-size: 24px; font-weight: 900; }
+        .decision-real { color: #007bff; }
+        .decision-fake { color: #dc3545; }
+
+    </style>
+</head>
+<body>
+
+    <div class="header">
+        <div class="header-text">
+            <h1>🛡️ 실시간 멀티모달 탐지기</h1>
+            <p>KB스타 프렌즈는 서로 다른 별에서 각자의 꿈을 찾아 지구에 모인 친구들.<br>서로를 응원하며 함께 꿈을 이루기 위해 노력하고 매일매일 조금씩 성장해 갑니다.</p>
+        </div>
+        <!-- 캐릭터 이미지 다시 복구! (HTML 파일과 같은 폴더에 있어야 합니다) -->
+        <img src="image_d9eefb.png" alt="KB Star Friends" class="header-img">
+    </div>
+
+    <button id="toggleBtn" onclick="toggleSystem()">시스템 시작 및 연결</button>
+
+    <div class="video-container">
+        <video id="video" autoplay playsinline muted></video>
+        <canvas id="canvas" width="640" height="480"></canvas>
+    </div>
+
+    <!-- 4가지 경우의 수 분석 카드 -->
+    <div class="grid-container">
+        <!-- 0,0: 진짜/진짜 -->
+        <div class="card card-00" id="card-00">
+            <div class="current-badge">현재 판정</div>
+            <div class="card-title">(0,0) <span style="color:#007bff">REAL</span> Audio & <span style="color:#007bff">REAL</span> Video</div>
+            <div class="card-subtitle">(A<sub>R</sub>V<sub>R</sub>)</div>
+            <div class="card-content">
+                <div class="icon check">✔️<br><span style="font-size:12px; color:#333;">진짜</span></div>
+                <canvas class="card-snapshot" id="snap-00"></canvas>
+            </div>
+            <div class="card-scores">
+                음성 위험도 <span id="score-a-00">0.00%</span><br>
+                영상 딥페이크 점수 <span id="score-v-00">0.00%</span>
+            </div>
+        </div>
+
+        <!-- 0,1: 가짜음성/진짜영상 -->
+        <div class="card card-01" id="card-01">
+            <div class="current-badge">현재 판정</div>
+            <div class="card-title">(0,1) <span style="color:#dc3545">FAKE</span> Audio & <span style="color:#007bff">REAL</span> Video</div>
+            <div class="card-subtitle">(A<sub>F</sub>V<sub>R</sub>)</div>
+            <div class="card-content">
+                <div class="icon cross">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
+                <canvas class="card-snapshot" id="snap-01"></canvas>
+            </div>
+            <div class="card-scores">
+                음성 위험도 <span id="score-a-01">0.00%</span><br>
+                영상 딥페이크 점수 <span id="score-v-01">0.00%</span>
+            </div>
+        </div>
+
+        <!-- 1,0: 진짜음성/가짜영상 -->
+        <div class="card card-10" id="card-10">
+            <div class="current-badge">현재 판정</div>
+            <div class="card-title">(1,0) <span style="color:#007bff">REAL</span> Audio & <span style="color:#dc3545">FAKE</span> Video</div>
+            <div class="card-subtitle">(A<sub>R</sub>V<sub>F</sub>)</div>
+            <div class="card-content">
+                <div class="icon check" style="color:#dc3545">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
+                <canvas class="card-snapshot" id="snap-10"></canvas>
+            </div>
+            <div class="card-scores">
+                음성 위험도 <span id="score-a-10">0.00%</span><br>
+                영상 딥페이크 점수 <span id="score-v-10">0.00%</span>
+            </div>
+        </div>
+
+        <!-- 1,1: 가짜음성/가짜영상 -->
+        <div class="card card-11" id="card-11">
+            <div class="current-badge">현재 판정</div>
+            <div class="card-title">(1,1) <span style="color:#dc3545">FAKE</span> Audio & <span style="color:#dc3545">FAKE</span> Video</div>
+            <div class="card-subtitle">(A<sub>F</sub>V<sub>F</sub>)</div>
+            <div class="card-content">
+                <div class="icon cross">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
+                <canvas class="card-snapshot" id="snap-11"></canvas>
+            </div>
+            <div class="card-scores">
+                음성 위험도 <span id="score-a-11">0.00%</span><br>
+                영상 딥페이크 점수 <span id="score-v-11">0.00%</span>
+            </div>
+        </div>
+    </div>
+
+    <!-- 하단 상태 표시 바 -->
+    <div class="bottom-bar">
+        <div class="info-item" style="flex: 2;">
+            <div class="info-title">💬 인식 텍스트</div>
+            <div class="info-value" id="ui-transcript">대기 중...</div>
+        </div>
+        <div class="info-item" style="flex: 1;">
+            <div class="info-title">🎙️ 음성 위험도</div>
+            <div class="info-value" id="ui-audio-score">0.0%</div>
+        </div>
+        <div class="info-item" style="flex: 1;">
+            <div class="info-title">🎥 영상 딥페이크 점수</div>
+            <div class="info-value" id="ui-video-score">0.0%</div>
+        </div>
+        <div class="info-item" style="flex: 1; text-align: center;">
+            <div class="info-title" style="justify-content: center;">🛡️ 최종 판정</div>
+            <div class="final-decision" id="ui-threat">-</div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let audioContext = null;
+        let mediaStream = null;
+        let processor = null;
+        let frameInterval = null;
+        let isRunning = false;
+        let clearTimer = null;
+
+        // 글로벌 변수로 점수 관리
+        let currentAudioScore = 0.0;
+        let currentVideoScore = 0.0;
+
+        const toggleBtn = document.getElementById('toggleBtn');
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+
+        async function toggleSystem() {
+            if (!isRunning) {
+                try {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: { channelCount: 1, sampleRate: 16000 },
+                        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }
+                    });
+                    
+                    video.srcObject = mediaStream;
+
+                    ws = new WebSocket("ws://127.0.0.1:8000/ws/detect/test-session-1?token=secret-token-123");
+                    ws.binaryType = "arraybuffer";
+
+                    ws.onopen = () => {
+                        document.getElementById('ui-transcript').innerText = "서버 연결 성공! 말을 시작해주세요 🎤";
+                        toggleBtn.innerText = "시스템 중지하기";
+                        toggleBtn.className = "stop";
+                        isRunning = true;
+                        
+                        startAudioProcessing(mediaStream);
+                        frameInterval = setInterval(sendVideoFrame, 500);
+                    };
+
+                    ws.onmessage = (event) => {
+                        const data = JSON.parse(event.data);
+                        
+                        if (data.event === "VIDEO_ANALYZED") {
+                            currentVideoScore = data.video_score || 0;
+                            updateUI("", currentAudioScore, currentVideoScore, data.threat_level);
+                        } 
+                        else if (data.event === "INTENT_ANALYZED" || data.transcript_latest) {
+                            currentAudioScore = data.risk_score || 0;
+                            updateUI(data.transcript_latest, currentAudioScore, currentVideoScore, data.threat_level);
+                        }
+                    };
+
+                    ws.onclose = () => {
+                        stopSystem();
+                        document.getElementById('ui-transcript').innerText = "서버와 연결이 끊어졌습니다. ❌";
+                    };
+
+                } catch (err) {
+                    alert("마이크와 카메라 권한을 모두 허용해야 이용할 수 있습니다!");
+                    console.error(err);
+                }
+            } else {
+                stopSystem();
+            }
+        }
+
+        function updateUI(transcript, audioRisk, videoRisk, threat) {
+            // 점수 포맷팅
+            let audioPct = (audioRisk * 100).toFixed(1);
+            let videoPct = (videoRisk * 100).toFixed(1);
+
+            // 임계값(Threshold) 설정 (예: 60% 이상이면 위험)
+            const THRESHOLD = 60.0;
+            const isAudioFake = (audioRisk * 100) >= THRESHOLD;
+            const isVideoFake = (videoRisk * 100) >= THRESHOLD;
+
+            // 1. 하단 바 업데이트
+            if (transcript) {
+                if (clearTimer) clearTimeout(clearTimer);
+                document.getElementById('ui-transcript').innerHTML = `<span style="color:#007bff">${transcript}</span> <span style="font-size:12px; color:#aaa;">(1초 후 사라짐)</span>`;
+                
+                clearTimer = setTimeout(() => {
+                    document.getElementById('ui-transcript').innerHTML = `<span style="color:#ccc;">(대기 중...)</span>`;
+                }, 1000);
+            }
+
+            document.getElementById('ui-audio-score').innerText = audioPct + "%";
+            document.getElementById('ui-video-score').innerText = videoPct + "%";
+
+            // 최종 판정 텍스트 (사기 O / 사기 X 로 변경)
+            const threatElem = document.getElementById('ui-threat');
+            if (isAudioFake || isVideoFake) {
+                threatElem.innerHTML = `<span class="decision-fake" style="color: #dc3545;">사기 O</span>`;
+            } else {
+                threatElem.innerHTML = `<span class="decision-real" style="color: #007bff;">사기 X</span>`;
+            }
+
+            // 2. 4가지 카드 활성화 로직
+            document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
+            
+            let activeCardId = "";
+            if (!isAudioFake && !isVideoFake) activeCardId = 'card-00'; // 진짜/진짜
+            else if (isAudioFake && !isVideoFake) activeCardId = 'card-01'; // 가짜/진짜
+            else if (!isAudioFake && isVideoFake) activeCardId = 'card-10'; // 진짜/가짜
+            else if (isAudioFake && isVideoFake) activeCardId = 'card-11'; // 가짜/가짜
+
+            const activeCard = document.getElementById(activeCardId);
+            activeCard.classList.add('active');
+
+            // 3. 활성화된 카드의 수치 및 스냅샷 업데이트
+            const idSuffix = activeCardId.split('-')[1];
+            document.getElementById(`score-a-${idSuffix}`).innerText = audioPct + "%";
+            document.getElementById(`score-v-${idSuffix}`).innerText = videoPct + "%";
+
+            // 비디오 화면 캡처해서 활성화된 카드의 작은 캔버스에 그리기
+            const snapCanvas = document.getElementById(`snap-${idSuffix}`);
+            if(snapCanvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+                const sCtx = snapCanvas.getContext('2d');
+                snapCanvas.width = 100;
+                snapCanvas.height = 75;
+                sCtx.drawImage(video, 0, 0, 100, 75);
+            }
+        }
+
+        function startAudioProcessing(stream) {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const source = audioContext.createMediaStreamSource(stream);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+            
+            processor.onaudioprocess = (e) => {
+                if (!ws || ws.readyState !== WebSocket.OPEN) return;
+                const inputData = e.inputBuffer.getChannelData(0);
+                const pcm16 = new Int16Array(inputData.length);
+                for (let i = 0; i < inputData.length; i++) {
+                    let s = Math.max(-1, Math.min(1, inputData[i]));
+                    pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+                }
+                ws.send(pcm16.buffer); 
+            };
+
+            source.connect(processor);
+            processor.connect(audioContext.destination);
+        }
+
+        function sendVideoFrame() {
+            if (ws && ws.readyState === WebSocket.OPEN && video.readyState === video.HAVE_ENOUGH_DATA) {
+                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                const imageData = canvas.toDataURL('image/jpeg', 0.7);
+                
+                ws.send(JSON.stringify({
+                    type: "video_frame",
+                    data: imageData
+                }));
+            }
+        }
+
+        function stopSystem() {
+            isRunning = false;
+            toggleBtn.innerText = "시스템 시작 및 연결";
+            toggleBtn.className = "";
+            document.getElementById('ui-transcript').innerText = "시스템 중지됨 ⏹️";
+            document.getElementById('ui-threat').innerText = "-"; // 정지 시 상태 표시 초기화
+
+            if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
+            if (processor) { processor.disconnect(); processor = null; }
+            if (audioContext) { audioContext.close(); audioContext = null; }
+            if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
+            if (ws) { ws.close(); ws = null; }
+            video.srcObject = null;
+        }
+    </script>
+</body>
+</html>
