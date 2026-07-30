@@ -3,83 +3,126 @@
 <head>
     <meta charset="UTF-8">
     <title>실시간 멀티모달 딥페이크 및 피싱 탐지</title>
-    <!-- KB 폰트 느낌을 주기 위해 깔끔하고 둥근 Noto Sans KR 적용 -->
-    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;700;900&display=swap" rel="stylesheet">
+    <!-- 둥글고 귀여운 폰트 적용 (Noto Sans KR) -->
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@500;700;900&display=swap" rel="stylesheet">
     <style>
         :root {
-            --kb-yellow: #ffcc00;
-            --kb-gray: #555555;
-            --bg-blue: #e3f0fb;
+            --kb-yellow: #FFCC00;
+            --kb-yellow-dark: #E6B800;
+            --kb-gray: #4A4A4A;
+            --bg-blue: #E3F0FB;
+            --card-border: #F0F4F8;
         }
         body { 
             text-align: center; 
-            /* KB 전용 폰트가 기기에 있으면 먼저 적용, 없으면 Noto Sans KR */
             font-family: 'KBFGText', 'KB금융표준체', 'Noto Sans KR', sans-serif; 
             background-color: var(--bg-blue); 
             margin: 0; 
-            padding: 20px; 
-            color: #333;
+            padding: 30px 20px; 
+            color: var(--kb-gray);
         }
+
+        /* 🌟 전체를 감싸는 메인 흰색 보드 (비어보임 방지) */
+        .main-wrapper {
+            background: rgba(255, 255, 255, 0.6);
+            border: 3px solid #ffffff;
+            border-radius: 40px;
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 40px 30px;
+            box-shadow: 0 15px 35px rgba(0, 92, 169, 0.05);
+        }
+
         .header {
             display: flex;
             align-items: center;
             justify-content: center;
-            margin-bottom: 20px;
-            gap: 20px;
+            margin-bottom: 30px;
+            gap: 25px;
+            background: #ffffff;
+            padding: 20px 40px;
+            border-radius: 30px;
+            box-shadow: 0 8px 20px rgba(0,0,0,0.03);
         }
         .header-text {
-            text-align: left; /* 사진과 어울리게 다시 좌측 정렬 */
-            max-width: 600px;
+            text-align: left;
+            max-width: 550px;
         }
         .header-text h1 {
-            font-size: 32px;
-            margin: 0 0 10px 0;
+            font-size: 30px;
+            margin: 0 0 8px 0;
             color: #2c3e50;
-            display: flex;
-            align-items: center;
-            gap: 10px;
+            font-weight: 900;
         }
         .header-text p {
-            font-size: 15px;
-            color: #555;
-            line-height: 1.5;
+            font-size: 14px;
+            color: #777;
+            line-height: 1.6;
             margin: 0;
         }
-        /* 다시 추가된 캐릭터 사진 CSS */
         .header-img {
-            height: 150px;
+            height: 130px;
             object-fit: contain;
+            mix-blend-mode: multiply; /* 배경 자연스럽게 섞기 */
         }
         
+        /* 🌟 귀여운 입체 젤리 버튼 */
         button { 
-            padding: 15px 40px; 
-            font-size: 22px; 
+            padding: 16px 45px; 
+            font-size: 20px; 
             font-weight: 900; 
             cursor: pointer; 
             border: none; 
-            border-radius: 30px; 
-            background-color: var(--kb-yellow); 
+            border-radius: 50px; 
+            background: linear-gradient(145deg, #FFD633, #FFC200);
             color: #333; 
-            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            transition: 0.2s; 
-            margin-bottom: 20px;
+            box-shadow: 0 6px 0 #D9A500, 0 10px 20px rgba(0,0,0,0.1);
+            transition: all 0.15s ease; 
+            margin-bottom: 30px;
+            letter-spacing: -0.5px;
         }
-        button:hover { background-color: #e6b800; transform: scale(1.05); }
-        button.stop { background-color: #dc3545; color: white; }
-        button.stop:hover { background-color: #a71d2a; }
+        button:active { 
+            transform: translateY(6px); 
+            box-shadow: 0 0 0 #D9A500, 0 4px 10px rgba(0,0,0,0.1); 
+        }
+        button.stop { 
+            background: linear-gradient(145deg, #FF6B6B, #EE5253);
+            color: white; 
+            box-shadow: 0 6px 0 #C83A3A, 0 10px 20px rgba(0,0,0,0.1);
+        }
+        button.stop:active {
+            box-shadow: 0 0 0 #C83A3A, 0 4px 10px rgba(0,0,0,0.1);
+        }
 
-        .video-container {
-            display: flex;
-            justify-content: center;
-            margin-bottom: 20px;
+        /* 🌟 비디오 프레임 디자인 */
+        .video-wrapper {
+            background: #ffffff;
+            padding: 15px;
+            border-radius: 25px;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.06);
+            display: inline-block;
+            margin-bottom: 30px;
+            position: relative;
+        }
+        .video-wrapper::before {
+            content: '🔴 REC';
+            position: absolute;
+            top: 25px;
+            left: 25px;
+            background: rgba(255, 0, 0, 0.8);
+            color: white;
+            font-size: 12px;
+            font-weight: 900;
+            padding: 5px 10px;
+            border-radius: 10px;
+            z-index: 10;
         }
         video { 
-            background: #000; 
-            border: 5px solid #fff; 
+            background: #111; 
             border-radius: 15px; 
-            box-shadow: 0 8px 15px rgba(0,0,0,0.1);
             width: 100%; 
-            max-width: 480px; 
+            max-width: 520px; 
+            display: block;
         }
         canvas { display: none; }
 
@@ -87,87 +130,96 @@
         .grid-container {
             display: flex;
             justify-content: center;
-            gap: 15px;
-            margin-bottom: 20px;
+            gap: 18px;
+            margin-bottom: 30px;
         }
         .card {
             background: #fff;
-            border-radius: 15px;
-            padding: 15px;
-            width: 220px;
-            box-shadow: 0 4px 8px rgba(0,0,0,0.05);
+            border-radius: 20px;
+            padding: 20px 15px;
+            width: 230px;
+            box-shadow: 0 6px 15px rgba(0,0,0,0.04);
             position: relative;
-            transition: all 0.3s ease;
-            opacity: 0.6; /* 기본은 흐리게 */
-            border: 4px solid transparent;
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            opacity: 0.5; /* 기본 흐리게 */
+            border: 3px solid var(--card-border);
         }
         .card.active {
             opacity: 1;
-            transform: scale(1.05);
-            box-shadow: 0 8px 20px rgba(0,0,0,0.15);
+            transform: translateY(-8px);
+            box-shadow: 0 15px 30px rgba(0,0,0,0.1);
         }
         
-        /* 각 카드별 색상 (테두리 및 강조) */
-        .card-00.active { border-color: #ffd700; background-color: #fffde7; } /* 노랑/초록 느낌 */
-        .card-01.active { border-color: #ffa500; background-color: #fff3e0; } /* 주황 */
-        .card-10.active { border-color: #87ceeb; background-color: #e1f5fe; } /* 파랑 */
-        .card-11.active { border-color: #ff9999; background-color: #ffebee; } /* 빨강 */
+        /* 카드 컬러 포인트 */
+        .card-00.active { border-color: #007bff; background: #f0f7ff; } 
+        .card-01.active { border-color: #ff9800; background: #fff8e1; } 
+        .card-10.active { border-color: #9c27b0; background: #fdf5ff; } 
+        .card-11.active { border-color: #dc3545; background: #fff0f1; } 
 
-        .card-title { font-size: 14px; font-weight: bold; margin-bottom: 5px; }
-        .card-subtitle { font-size: 12px; color: #666; margin-bottom: 10px; }
+        .card-title { font-size: 15px; font-weight: 900; margin-bottom: 5px; color: #222;}
+        .card-subtitle { font-size: 12px; color: #888; margin-bottom: 15px; font-weight: bold;}
         
         .card-content {
             display: flex;
             align-items: center;
             justify-content: center;
-            gap: 10px;
+            gap: 15px;
         }
-        .icon { font-size: 30px; font-weight: bold; }
-        .icon.check { color: #28a745; }
-        .icon.cross { color: #dc3545; }
+        .icon { font-size: 32px; font-weight: 900; line-height: 1.2;}
         
         .card-snapshot {
-            width: 100px;
-            height: 75px;
-            background: #ccc;
-            border-radius: 8px;
+            width: 90px;
+            height: 70px;
+            background: #e9ecef;
+            border-radius: 12px;
             object-fit: cover;
+            border: 2px dashed #ccc; /* 사진이 없을 때 귀여운 점선 */
         }
-        .card-scores { font-size: 11px; color: #333; margin-top: 10px; line-height: 1.4; }
+        .card.active .card-snapshot { border: 2px solid transparent; } /* 활성화되면 점선 제거 */
+
+        .card-scores { font-size: 12px; color: #555; margin-top: 15px; line-height: 1.6; font-weight: bold;}
+        .card-scores span { font-weight: 900; color: #222; }
 
         .current-badge {
             display: none;
             position: absolute;
-            top: -12px;
+            top: -15px;
             left: 50%;
             transform: translateX(-50%);
-            background: #ffcc00;
-            color: #333;
-            font-size: 12px;
-            font-weight: bold;
-            padding: 3px 10px;
-            border-radius: 10px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.2);
+            background: #333;
+            color: #fff;
+            font-size: 13px;
+            font-weight: 900;
+            padding: 6px 14px;
+            border-radius: 20px;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.2);
         }
+        .card-00.active .current-badge { background: #007bff; }
+        .card-01.active .current-badge { background: #ff9800; }
+        .card-10.active .current-badge { background: #9c27b0; }
+        .card-11.active .current-badge { background: #dc3545; }
         .card.active .current-badge { display: block; }
 
         /* 하단 최종 결과 바 */
         .bottom-bar {
             background: #fff;
-            border-radius: 15px;
-            padding: 15px 25px;
+            border-radius: 25px;
+            padding: 20px 30px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            box-shadow: 0 4px 10px rgba(0,0,0,0.1);
+            box-shadow: 0 8px 25px rgba(0,0,0,0.06);
             max-width: 950px;
             margin: 0 auto;
+            border: 2px solid #e3f0fb;
         }
         .info-item { text-align: left; }
-        .info-title { font-size: 14px; color: #777; font-weight: bold; margin-bottom: 5px; display: flex; align-items: center; gap: 5px;}
-        .info-value { font-size: 18px; font-weight: 900; color: #333; }
+        .info-item:not(:last-child) { border-right: 2px dashed #eee; padding-right: 20px; margin-right: 20px; }
         
-        .final-decision { font-size: 24px; font-weight: 900; }
+        .info-title { font-size: 13px; color: #888; font-weight: 900; margin-bottom: 8px; display: flex; align-items: center; gap: 5px;}
+        .info-value { font-size: 18px; font-weight: 900; color: #222; }
+        
+        .final-decision { font-size: 26px; font-weight: 900; }
         .decision-real { color: #007bff; }
         .decision-fake { color: #dc3545; }
 
@@ -175,104 +227,112 @@
 </head>
 <body>
 
-    <div class="header">
-        <div class="header-text">
-            <h1>🛡️ 실시간 멀티모달 탐지기</h1>
-            <p>KB스타 프렌즈는 서로 다른 별에서 각자의 꿈을 찾아 지구에 모인 친구들.<br>서로를 응원하며 함께 꿈을 이루기 위해 노력하고 매일매일 조금씩 성장해 갑니다.</p>
-        </div>
-        <!-- 캐릭터 이미지 다시 복구! (HTML 파일과 같은 폴더에 있어야 합니다) -->
-        <img src="image_d9eefb.png" alt="KB Star Friends" class="header-img">
-    </div>
-
-    <button id="toggleBtn" onclick="toggleSystem()">시스템 시작 및 연결</button>
-
-    <div class="video-container">
-        <video id="video" autoplay playsinline muted></video>
-        <canvas id="canvas" width="640" height="480"></canvas>
-    </div>
-
-    <!-- 4가지 경우의 수 분석 카드 -->
-    <div class="grid-container">
-        <!-- 0,0: 진짜/진짜 -->
-        <div class="card card-00" id="card-00">
-            <div class="current-badge">현재 판정</div>
-            <div class="card-title">(0,0) <span style="color:#007bff">REAL</span> Audio & <span style="color:#007bff">REAL</span> Video</div>
-            <div class="card-subtitle">(A<sub>R</sub>V<sub>R</sub>)</div>
-            <div class="card-content">
-                <div class="icon check">✔️<br><span style="font-size:12px; color:#333;">진짜</span></div>
-                <canvas class="card-snapshot" id="snap-00"></canvas>
+    <!-- 🌟 전체 내용을 묶어주는 메인 래퍼 -->
+    <div class="main-wrapper">
+        
+        <div class="header">
+            <div class="header-text">
+                <h1>🛡️ 실시간 멀티모달 탐지기</h1>
+                <p>KB스타 프렌즈는 서로 다른 별에서 각자의 꿈을 찾아 지구에 모인 친구들.<br>서로를 응원하며 함께 꿈을 이루기 위해 노력하고 매일매일 조금씩 성장해 갑니다.</p>
             </div>
-            <div class="card-scores">
-                음성 위험도 <span id="score-a-00">0.00%</span><br>
-                영상 딥페이크 점수 <span id="score-v-00">0.00%</span>
-            </div>
+            <!-- 캐릭터 이미지 -->
+            <img src="image_d9eefb.png" alt="KB Star Friends" class="header-img">
         </div>
 
-        <!-- 0,1: 가짜음성/진짜영상 -->
-        <div class="card card-01" id="card-01">
-            <div class="current-badge">현재 판정</div>
-            <div class="card-title">(0,1) <span style="color:#dc3545">FAKE</span> Audio & <span style="color:#007bff">REAL</span> Video</div>
-            <div class="card-subtitle">(A<sub>F</sub>V<sub>R</sub>)</div>
-            <div class="card-content">
-                <div class="icon cross">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
-                <canvas class="card-snapshot" id="snap-01"></canvas>
+        <button id="toggleBtn" onclick="toggleSystem()">시스템 시작 및 연결</button>
+
+        <!-- 🌟 비디오 프레임 추가 -->
+        <div>
+            <div class="video-wrapper">
+                <video id="video" autoplay playsinline muted></video>
             </div>
-            <div class="card-scores">
-                음성 위험도 <span id="score-a-01">0.00%</span><br>
-                영상 딥페이크 점수 <span id="score-v-01">0.00%</span>
+            <canvas id="canvas" width="640" height="480"></canvas>
+        </div>
+
+        <!-- 4가지 경우의 수 분석 카드 -->
+        <div class="grid-container">
+            <!-- 0,0 -->
+            <div class="card card-00" id="card-00">
+                <div class="current-badge">현재 판정</div>
+                <div class="card-title">(0,0) <span style="color:#007bff">REAL</span> & <span style="color:#007bff">REAL</span></div>
+                <div class="card-subtitle">(A<sub>R</sub>V<sub>R</sub>)</div>
+                <div class="card-content">
+                    <div class="icon" style="color:#007bff">🔵<br><span style="font-size:14px;">진짜</span></div>
+                    <canvas class="card-snapshot" id="snap-00"></canvas>
+                </div>
+                <div class="card-scores">
+                    음성 위험도 <span id="score-a-00">0.00%</span><br>
+                    영상 조작도 <span id="score-v-00">0.00%</span>
+                </div>
+            </div>
+
+            <!-- 0,1 -->
+            <div class="card card-01" id="card-01">
+                <div class="current-badge">현재 판정</div>
+                <!-- 수정 후 -->
+                <div class="card-title">(0,1) <span style="color:#dc3545">FAKE</span> & <span style="color:#007bff">REAL</span></div>
+                <div class="card-subtitle">(A<sub>F</sub>V<sub>R</sub>)</div>
+                <div class="card-content">
+                    <div class="icon" style="color:#dc3545">❌<br><span style="font-size:14px;">가짜</span></div>
+                    <canvas class="card-snapshot" id="snap-01"></canvas>
+                </div>
+                <div class="card-scores">
+                    음성 위험도 <span id="score-a-01">0.00%</span><br>
+                    영상 조작도 <span id="score-v-01">0.00%</span>
+                </div>
+            </div>
+
+            <!-- 1,0 -->
+            <div class="card card-10" id="card-10">
+                <div class="current-badge">현재 판정</div>
+                <div class="card-title">(1,0) <span style="color:#007bff">REAL</span> & <span style="color:#dc3545">FAKE</span></div>
+<div class="card-subtitle">(A<sub>R</sub>V<sub>F</sub>)</div>
+<div class="card-content">
+    <div class="icon" style="color:#dc3545">❌<br><span style="font-size:14px;">가짜</span></div>
+                    <canvas class="card-snapshot" id="snap-10"></canvas>
+                </div>
+                <div class="card-scores">
+                    음성 위험도 <span id="score-a-10">0.00%</span><br>
+                    영상 조작도 <span id="score-v-10">0.00%</span>
+                </div>
+            </div>
+
+            <!-- 1,1 -->
+            <div class="card card-11" id="card-11">
+                <div class="current-badge">현재 판정</div>
+                <div class="card-title">(1,1) <span style="color:#dc3545">FAKE</span> & <span style="color:#dc3545">FAKE</span></div>
+                <div class="card-subtitle">(A<sub>F</sub>V<sub>F</sub>)</div>
+                <div class="card-content">
+                    <div class="icon" style="color:#dc3545">❌<br><span style="font-size:14px;">가짜</span></div>
+                </div>
+                <div class="card-scores">
+                    음성 위험도 <span id="score-a-11">0.00%</span><br>
+                    영상 조작도 <span id="score-v-11">0.00%</span>
+                </div>
             </div>
         </div>
 
-        <!-- 1,0: 진짜음성/가짜영상 -->
-        <div class="card card-10" id="card-10">
-            <div class="current-badge">현재 판정</div>
-            <div class="card-title">(1,0) <span style="color:#007bff">REAL</span> Audio & <span style="color:#dc3545">FAKE</span> Video</div>
-            <div class="card-subtitle">(A<sub>R</sub>V<sub>F</sub>)</div>
-            <div class="card-content">
-                <div class="icon check" style="color:#dc3545">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
-                <canvas class="card-snapshot" id="snap-10"></canvas>
+        <!-- 하단 상태 표시 바 -->
+        <div class="bottom-bar">
+            <div class="info-item" style="flex: 2.5;">
+                <div class="info-title">💬 인식 텍스트</div>
+                <div class="info-value" id="ui-transcript" style="color:#999; font-weight:500;">마이크 대기 중...</div>
             </div>
-            <div class="card-scores">
-                음성 위험도 <span id="score-a-10">0.00%</span><br>
-                영상 딥페이크 점수 <span id="score-v-10">0.00%</span>
+            <div class="info-item" style="flex: 1;">
+                <div class="info-title">🎙️ 음성 위험도</div>
+                <div class="info-value" id="ui-audio-score">0.0%</div>
+            </div>
+            <div class="info-item" style="flex: 1;">
+                <div class="info-title">🎥 영상 조작도</div>
+                <div class="info-value" id="ui-video-score">0.0%</div>
+            </div>
+            <div class="info-item" style="flex: 1; text-align: center; border-right: none; margin-right: 0; padding-right: 0;">
+                <div class="info-title" style="justify-content: center;">🛡️ 최종 판정</div>
+                <div class="final-decision" id="ui-threat" style="color:#ccc;">-</div>
             </div>
         </div>
 
-        <!-- 1,1: 가짜음성/가짜영상 -->
-        <div class="card card-11" id="card-11">
-            <div class="current-badge">현재 판정</div>
-            <div class="card-title">(1,1) <span style="color:#dc3545">FAKE</span> Audio & <span style="color:#dc3545">FAKE</span> Video</div>
-            <div class="card-subtitle">(A<sub>F</sub>V<sub>F</sub>)</div>
-            <div class="card-content">
-                <div class="icon cross">❌<br><span style="font-size:12px; color:#333;">가짜</span></div>
-                <canvas class="card-snapshot" id="snap-11"></canvas>
-            </div>
-            <div class="card-scores">
-                음성 위험도 <span id="score-a-11">0.00%</span><br>
-                영상 딥페이크 점수 <span id="score-v-11">0.00%</span>
-            </div>
-        </div>
-    </div>
-
-    <!-- 하단 상태 표시 바 -->
-    <div class="bottom-bar">
-        <div class="info-item" style="flex: 2;">
-            <div class="info-title">💬 인식 텍스트</div>
-            <div class="info-value" id="ui-transcript">대기 중...</div>
-        </div>
-        <div class="info-item" style="flex: 1;">
-            <div class="info-title">🎙️ 음성 위험도</div>
-            <div class="info-value" id="ui-audio-score">0.0%</div>
-        </div>
-        <div class="info-item" style="flex: 1;">
-            <div class="info-title">🎥 영상 딥페이크 점수</div>
-            <div class="info-value" id="ui-video-score">0.0%</div>
-        </div>
-        <div class="info-item" style="flex: 1; text-align: center;">
-            <div class="info-title" style="justify-content: center;">🛡️ 최종 판정</div>
-            <div class="final-decision" id="ui-threat">-</div>
-        </div>
-    </div>
+    </div> <!-- 메인 래퍼 끝 -->
 
     <script>
         let ws = null;
@@ -283,7 +343,6 @@
         let isRunning = false;
         let clearTimer = null;
 
-        // 글로벌 변수로 점수 관리
         let currentAudioScore = 0.0;
         let currentVideoScore = 0.0;
 
@@ -306,7 +365,7 @@
                     ws.binaryType = "arraybuffer";
 
                     ws.onopen = () => {
-                        document.getElementById('ui-transcript').innerText = "서버 연결 성공! 말을 시작해주세요 🎤";
+                        document.getElementById('ui-transcript').innerHTML = `<span style="color:#007bff;">서버 연결 성공! 말을 시작해주세요 🎤</span>`;
                         toggleBtn.innerText = "시스템 중지하기";
                         toggleBtn.className = "stop";
                         isRunning = true;
@@ -330,7 +389,7 @@
 
                     ws.onclose = () => {
                         stopSystem();
-                        document.getElementById('ui-transcript').innerText = "서버와 연결이 끊어졌습니다. ❌";
+                        document.getElementById('ui-transcript').innerHTML = `<span style="color:#dc3545;">서버와 연결이 끊어졌습니다. ❌</span>`;
                     };
 
                 } catch (err) {
@@ -343,29 +402,25 @@
         }
 
         function updateUI(transcript, audioRisk, videoRisk, threat) {
-            // 점수 포맷팅
             let audioPct = (audioRisk * 100).toFixed(1);
             let videoPct = (videoRisk * 100).toFixed(1);
 
-            // 임계값(Threshold) 설정 (예: 60% 이상이면 위험)
             const THRESHOLD = 60.0;
             const isAudioFake = (audioRisk * 100) >= THRESHOLD;
             const isVideoFake = (videoRisk * 100) >= THRESHOLD;
 
-            // 1. 하단 바 업데이트
             if (transcript) {
                 if (clearTimer) clearTimeout(clearTimer);
-                document.getElementById('ui-transcript').innerHTML = `<span style="color:#007bff">${transcript}</span> <span style="font-size:12px; color:#aaa;">(1초 후 사라짐)</span>`;
+                document.getElementById('ui-transcript').innerHTML = `<span style="color:#222;">"${transcript}"</span> <span style="font-size:12px; color:#aaa; font-weight:normal;">(1초 후 사라짐)</span>`;
                 
                 clearTimer = setTimeout(() => {
-                    document.getElementById('ui-transcript').innerHTML = `<span style="color:#ccc;">(대기 중...)</span>`;
+                    document.getElementById('ui-transcript').innerHTML = `<span style="color:#ccc; font-weight:500;">(대기 중...)</span>`;
                 }, 1000);
             }
 
             document.getElementById('ui-audio-score').innerText = audioPct + "%";
             document.getElementById('ui-video-score').innerText = videoPct + "%";
 
-            // 최종 판정 텍스트 (사기 O / 사기 X 로 변경)
             const threatElem = document.getElementById('ui-threat');
             if (isAudioFake || isVideoFake) {
                 threatElem.innerHTML = `<span class="decision-fake" style="color: #dc3545;">사기 O</span>`;
@@ -373,30 +428,27 @@
                 threatElem.innerHTML = `<span class="decision-real" style="color: #007bff;">사기 X</span>`;
             }
 
-            // 2. 4가지 카드 활성화 로직
             document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
             
             let activeCardId = "";
-            if (!isAudioFake && !isVideoFake) activeCardId = 'card-00'; // 진짜/진짜
-            else if (isAudioFake && !isVideoFake) activeCardId = 'card-01'; // 가짜/진짜
-            else if (!isAudioFake && isVideoFake) activeCardId = 'card-10'; // 진짜/가짜
-            else if (isAudioFake && isVideoFake) activeCardId = 'card-11'; // 가짜/가짜
+            if (!isAudioFake && !isVideoFake) activeCardId = 'card-00'; 
+            else if (isAudioFake && !isVideoFake) activeCardId = 'card-01'; 
+            else if (!isAudioFake && isVideoFake) activeCardId = 'card-10'; 
+            else if (isAudioFake && isVideoFake) activeCardId = 'card-11'; 
 
             const activeCard = document.getElementById(activeCardId);
             activeCard.classList.add('active');
 
-            // 3. 활성화된 카드의 수치 및 스냅샷 업데이트
             const idSuffix = activeCardId.split('-')[1];
             document.getElementById(`score-a-${idSuffix}`).innerText = audioPct + "%";
             document.getElementById(`score-v-${idSuffix}`).innerText = videoPct + "%";
 
-            // 비디오 화면 캡처해서 활성화된 카드의 작은 캔버스에 그리기
             const snapCanvas = document.getElementById(`snap-${idSuffix}`);
             if(snapCanvas && video.readyState === video.HAVE_ENOUGH_DATA) {
                 const sCtx = snapCanvas.getContext('2d');
-                snapCanvas.width = 100;
-                snapCanvas.height = 75;
-                sCtx.drawImage(video, 0, 0, 100, 75);
+                snapCanvas.width = 90;
+                snapCanvas.height = 70;
+                sCtx.drawImage(video, 0, 0, 90, 70);
             }
         }
 
@@ -436,8 +488,8 @@
             isRunning = false;
             toggleBtn.innerText = "시스템 시작 및 연결";
             toggleBtn.className = "";
-            document.getElementById('ui-transcript').innerText = "시스템 중지됨 ⏹️";
-            document.getElementById('ui-threat').innerText = "-"; // 정지 시 상태 표시 초기화
+            document.getElementById('ui-transcript').innerHTML = `<span style="color:#999; font-weight:500;">시스템 중지됨 ⏹️</span>`;
+            document.getElementById('ui-threat').innerHTML = `<span style="color:#ccc;">-</span>`;
 
             if (frameInterval) { clearInterval(frameInterval); frameInterval = null; }
             if (processor) { processor.disconnect(); processor = null; }
