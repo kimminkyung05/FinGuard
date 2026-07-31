@@ -3,10 +3,10 @@
 import json
 import unittest
 
-from video.service.aggregation import aggregate_frame_scores
-from video.service.confidence import calculate_confidence
-from video.service.output import build_output, dumps_output
-from video.service.risk import assess_risk
+from DeepFake.video.service.aggregation import aggregate_frame_scores
+from DeepFake.video.service.confidence import calculate_confidence
+from DeepFake.video.service.output import build_output, dumps_output
+from DeepFake.video.service.risk import assess_risk
 
 
 class VideoServiceTest(unittest.TestCase):

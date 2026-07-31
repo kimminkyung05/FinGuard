@@ -43,6 +43,10 @@ FACE_DETECTOR = cv2.CascadeClassifier(CASCADE_PATH)
 if FACE_DETECTOR.empty():
     raise RuntimeError('Unable to load OpenCV Haar cascade: {}'.format(CASCADE_PATH))
 FRAME_INTERVAL = 5
+# The legacy checkpoint's second softmax output was the previously displayed
+# genuine/true score. Keep that class contract explicit at the service edge.
+FAKE_CLASS_INDEX = 0
+REAL_CLASS_INDEX = 1
 
 
 def detect_largest_face(frame: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
@@ -113,7 +117,7 @@ def predict_with_model(image, model, post_function=nn.Softmax(dim=1),
     :param model: torch model with linear layer at the end
     :param post_function: e.g., softmax
     :param cuda: enables cuda, must be the same parameter as the model
-    :return: prediction (1 = fake, 0 = real)
+    :return: predicted checkpoint class index
     """
     # Preprocess
     preprocessed_image = preprocess_image(image, cuda, device=device)
@@ -341,15 +345,16 @@ def test_full_image_network(video_path, model_path, output_path,
             inference_times.append(inference_elapsed)
             print('[INFO] Inference: {:.2f} ms'.format(
                 inference_elapsed * 1000.0))
-            # Softmax makes this the fake-class probability, bounded to [0, 1].
-            fake_probability = float(output.detach().cpu().numpy()[0][1])
+            # The legacy UI exposed class 1 as the genuine/true score. The
+            # service must therefore use class 0 for its fake score.
+            fake_probability = float(output.detach().cpu().numpy()[0][FAKE_CLASS_INDEX])
             frame_scores.append(fake_probability)
             # ------------------------------------------------------------------
 
             # Text and bb
             x, y, w, h = face_bbox
-            label = 'fake' if prediction == 1 else 'real'
-            color = (0, 255, 0) if prediction == 0 else (0, 0, 255)
+            label = 'fake' if prediction == FAKE_CLASS_INDEX else 'real'
+            color = (0, 0, 255) if prediction == FAKE_CLASS_INDEX else (0, 255, 0)
             output_list = ['{0:.2f}'.format(float(x)) for x in output.detach().cpu().numpy()[0]]
             cv2.putText(image, str(output_list)+'=>'+label, (x, y+h+30),
                         font_face, font_scale,

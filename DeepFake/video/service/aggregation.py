@@ -9,7 +9,6 @@ import math
 HIGH_RISK_FRAME_THRESHOLD = 0.5
 TOP_K_RATIO = 0.10
 
-
 def _valid_scores(frame_scores):
     """Return finite frame probabilities, clamped to the [0, 1] range."""
     scores = []
