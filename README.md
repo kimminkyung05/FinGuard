@@ -23,12 +23,6 @@ FaceForensics는 영상 딥페이크와 음성 스푸핑/보이스피싱 징후�
 - Git
 - 브라우저 프로토타입 사용 시 웹캠과 마이크
 
-아래 명령은 모두 저장소 최상위인 `FaceForensics`에서 실행합니다. `DeepFake` 또는 `voice` 폴더로 이동할 필요가 없습니다.
-
-```powershell
-cd C:\Users\user\Desktop\minkyung\FaceForensics
-```
-
 ## 가상환경 설정
 
 패키지를 설치하거나 서버를 실행하기 전에 프로젝트 전용 가상환경을 생성하고 활성화합니다.
