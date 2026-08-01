@@ -1,5 +1,7 @@
 import asyncio
+import base64
 import contextlib
+from collections import deque
 import logging
 import secrets
 import time
@@ -26,6 +28,7 @@ from typing import Union
 import pydub.utils
 pydub.utils.which = lambda cmd: imageio_ffmpeg.get_ffmpeg_exe() if cmd in ["ffmpeg", "ffprobe"] else None
 import subprocess
+from pathlib import Path
 
 try:
     from transformers import pipeline
@@ -88,21 +91,130 @@ class Settings(BaseSettings):
     min_noise_power: float = 1e-6  # SNR 계산 시 noise_power 하한 (0에 가까울 때 SNR 폭주 방지)
     max_upload_bytes: int = 20 * 1024 * 1024  # 업로드 파일 크기 제한 (20MB)
     
+    audio_weight: float = 0.70
+    video_weight: float = 0.30
+
     class Config:
         env_prefix = "FRAUD_"
 
 settings = Settings()
+if abs(settings.audio_weight + settings.video_weight - 1.0) >= 1e-6:
+    raise ValueError("FRAUD_AUDIO_WEIGHT and FRAUD_VIDEO_WEIGHT must sum to 1.0")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("HybridServer")
 
 AudioSegment.converter = imageio_ffmpeg.get_ffmpeg_exe()
 current_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(os.path.dirname(current_dir), "aasist"))
+sys.path.append(os.path.join(current_dir, "aasist"))
+project_root = Path(current_dir).parent
+deepfake_root = project_root / "DeepFake"
+if str(deepfake_root) not in sys.path:
+    sys.path.append(str(deepfake_root))
+video_model_path = deepfake_root / "video" / "face_detection" / "xception" / "all_c23.p"
 
 try:
     from models.AASIST import Model as RealAASISTModel
 except ImportError:
     RealAASISTModel = None
+
+
+def load_video_inference():
+    """Load the trusted legacy Xception checkpoint and its existing preprocessor."""
+    try:
+        from video.service.xception_frame import predict_xception_frame
+
+        model = torch.load(video_model_path, map_location="cpu", weights_only=False)
+        model.to(TORCH_DEVICE)
+        model.eval()
+        logger.info("Video Xception model loaded: %s", video_model_path)
+        return model, predict_xception_frame
+    except Exception:
+        logger.exception("Video Xception model load failed")
+        return None, None
+
+
+def analyze_video_frame(base64_image: str, model, predictor) -> dict:
+    """Match the upload pipeline's face crop and Xception preprocessing for one frame."""
+    import cv2
+
+    encoded_image = base64_image.split(",", 1)[-1]
+    image_bytes = base64.b64decode(encoded_image, validate=True)
+    bgr_image = cv2.imdecode(np.frombuffer(image_bytes, dtype=np.uint8), cv2.IMREAD_COLOR)
+    if bgr_image is None:
+        raise ValueError("Invalid JPEG frame")
+    result = predictor(bgr_image, model, TORCH_DEVICE)
+    if not result["face_detected"]:
+        return {"valid": False, "face_detected": False, "face_detection_confidence": 0.0}
+    face_image = result.pop("face")
+    face_box = result["bbox"]
+    frame_area = bgr_image.shape[0] * bgr_image.shape[1]
+    face_area = face_box[2] * face_box[3]
+    face_detection_confidence = min(1.0, face_area / max(frame_area * 0.10, 1))
+    sharpness = float(cv2.Laplacian(face_image, cv2.CV_64F).var())
+    brightness = float(np.mean(cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)))
+    valid = face_image.shape[0] >= 64 and face_image.shape[1] >= 64 and sharpness >= 30.0 and 35.0 <= brightness <= 220.0
+    metrics = {
+        "valid": valid,
+        "face_detected": True,
+        "face_detection_confidence": round(face_detection_confidence, 4),
+        "sharpness": round(sharpness, 4),
+        "brightness": round(brightness, 4),
+    }
+    if not valid:
+        return metrics
+
+    metrics.update(result)
+    metrics["raw_score"] = result["fake_score"]
+    return metrics
+
+
+def update_video_decision(session, raw_score: float) -> dict:
+    """Aggregate valid frame scores with robust statistics and hysteresis."""
+    from video.service import aggregate_frame_scores
+    session.video_raw_scores.append(raw_score)
+    session.video_valid_flags.append(True)
+    scores = list(session.video_raw_scores)
+    valid_frame_count = len(scores)
+    if valid_frame_count < 8:
+        return {"status": "WARMING_UP", "video_decision": "ANALYZING", "valid_frame_count": valid_frame_count}
+
+    median_score = float(np.median(scores))
+    trimmed_scores = sorted(scores)
+    if len(trimmed_scores) >= 5:
+        trimmed_scores = trimmed_scores[1:-1]
+    trimmed_mean = float(np.mean(trimmed_scores))
+    # Use the upload pipeline's canonical video score (mean fake probability).
+    smoothed_score = float(aggregate_frame_scores(scores)["video_fake_score"])
+    fake_ratio = float(np.mean(np.asarray(scores) >= 0.90))
+
+    if smoothed_score >= 0.90 and fake_ratio >= 0.75:
+        session.consecutive_fake_windows += 1
+        session.consecutive_real_windows = 0
+        if session.consecutive_fake_windows >= 3:
+            session.video_last_decision = "FAKE"
+    elif smoothed_score <= 0.30:
+        session.consecutive_real_windows += 1
+        session.consecutive_fake_windows = 0
+        if session.consecutive_real_windows >= 2:
+            session.video_last_decision = "REAL"
+    else:
+        session.consecutive_fake_windows = 0
+        session.consecutive_real_windows = 0
+
+    decision = session.video_last_decision
+    if decision == "ANALYZING" and not (smoothed_score >= 0.90 and fake_ratio >= 0.75) and smoothed_score > 0.30:
+        decision = "UNCERTAIN"
+    return {
+        "status": "SUCCESS" if decision in {"REAL", "FAKE"} else decision,
+        "video_decision": decision,
+        "video_score": round(smoothed_score, 4),
+        "median": round(median_score, 4),
+        "trimmed_mean": round(trimmed_mean, 4),
+        "valid_frame_count": valid_frame_count,
+        "fake_ratio": round(fake_ratio, 4),
+        "fake_streak": session.consecutive_fake_windows,
+        "real_streak": session.consecutive_real_windows,
+    }
 
 # ==========================================
 # 🖥️ [1.5 연산 디바이스 감지 - CPU 병목 완화]
@@ -123,6 +235,9 @@ logger.info(f"🖥️ [디바이스] AASIST/torch: {TORCH_DEVICE} | Whisper: {WH
 
 app = FastAPI(title=settings.app_name)
 
+# TEMPORARY WEBSOCKET DIAGNOSTIC: remove or set to False after client verification.
+WEBSOCKET_DIAGNOSTIC_EVENT_ENABLED = True
+
 # ==========================================
 # 🤖 [2. 통합 AI 엔진 공유 풀]
 # ==========================================
@@ -133,12 +248,15 @@ class GlobalModelEngine:
         self.vad_model: Optional[torch.nn.Module] = None
         self.sbert_model: Optional[Any] = None
         self.prosody_classifier: Optional[Any] = None 
+        self.video_model: Optional[Any] = None
+        self.video_preprocess = None
         self.system_degraded: bool = False
         self.phishing_anchors = []
         # AASIST 모델은 추론마다 dropout 레이어를 train()<->eval()로 토글하므로(MC Dropout),
         # 동시에 여러 세션/요청이 같은 전역 모델 인스턴스에 접근하면 모드가 섞이는 레이스 컨디션이 발생한다.
         # 이 락으로 모델 추론 구간(모드 전환 포함)을 직렬화한다.
         self.aasist_lock = asyncio.Lock()
+        self.video_lock = asyncio.Lock()
         self.load_all_models()
 
     def load_all_models(self):
@@ -192,6 +310,8 @@ class GlobalModelEngine:
                 logger.exception(f"❌ [Prosody] 실패 - {e}")
                 self.prosody_classifier = None
 
+        self.video_model, self.video_preprocess = load_video_inference()
+
 engine = GlobalModelEngine()
 
 @app.get("/health")
@@ -207,6 +327,7 @@ async def health_check():
             "vad_model": engine.vad_model is not None,
             "sbert_model": engine.sbert_model is not None,
             "prosody_classifier": engine.prosody_classifier is not None,
+            "video_model": engine.video_model is not None,
         }
     }
 
@@ -477,12 +598,42 @@ class CallSession:
         self.speech_start_time = 0.0
         self.transcript_history: List[str] = []
         self.vad_probs: List[float] = []
+        self.video_raw_scores = deque(maxlen=20)
+        self.video_valid_flags = deque(maxlen=20)
+        self.video_last_decision = "ANALYZING"
+        self.consecutive_fake_windows = 0
+        self.consecutive_real_windows = 0
+        self.audio_risk_score = None
+        self.audio_decision = "ANALYZING"
+        self.video_fake_score = None
+        self.video_decision = "ANALYZING"
 
     def reset_speech_buffer(self):
         self.speech_buffer.clear()
         self.vad_probs.clear()
         self.is_speaking = False
         self.speech_start_time = 0.0
+
+def build_fusion_result(session: CallSession) -> dict:
+    audio_score = session.audio_risk_score
+    video_score = session.video_fake_score
+    if audio_score is None or video_score is None:
+        final_decision = "ANALYZING"
+        final_risk_score = None
+    else:
+        final_risk_score = settings.audio_weight * audio_score + settings.video_weight * video_score
+        if session.audio_decision == "ANALYZING" or session.video_decision == "ANALYZING":
+            final_decision = "ANALYZING"
+        elif session.audio_decision == "FAKE" and session.video_decision == "FAKE":
+            final_decision = "HIGH_RISK"
+        elif session.audio_decision == "FAKE" or session.video_decision == "FAKE":
+            final_decision = "SUSPICIOUS"
+        elif session.audio_decision == "UNCERTAIN" or session.video_decision == "UNCERTAIN":
+            final_decision = "REVIEW"
+        else:
+            final_decision = "SAFE"
+    return {"event": "FUSION_ANALYZED", "audio_risk_score": audio_score, "audio_decision": session.audio_decision, "video_fake_score": video_score, "video_decision": session.video_decision, "audio_weight": settings.audio_weight, "video_weight": settings.video_weight, "final_risk_score": final_risk_score, "final_risk_percent": None if final_risk_score is None else round(final_risk_score * 100, 1), "final_decision": final_decision}
+
 
 def realtime_multimodal_worker_sync(audio_array: np.ndarray, session: CallSession) -> Dict[str, Any]:
     result = {"text": "", "risk_score": 0.0, "threat_level": "NORMAL", "intent_detected": "None", "reasoning": ""}
@@ -657,6 +808,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
     audio_queue = asyncio.Queue(maxsize=50)
     
     logger.info(f"🔌 [WebSocket 연결] 세션 시작: {session_id}")
+    if WEBSOCKET_DIAGNOSTIC_EVENT_ENABLED:
+        await websocket.send_json({
+            "event": "INTENT_ANALYZED",
+            "transcript_latest": "WebSocket test",
+            "risk_score": 0.01,
+            "threat_level": "LOW",
+        })
+        logger.info("WebSocket diagnostic event sent: %s", session_id)
     chunk_size_bytes = int(settings.sample_rate * 2 * (settings.chunk_duration_ms / 1000.0))
 
     async def process_audio():
@@ -665,6 +824,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             while True:
                 data = await audio_queue.get()
                 audio_buffer.extend(data)
+                logger.debug("Audio bytes buffered: session=%s bytes=%d", session_id, len(audio_buffer))
 
                 while len(audio_buffer) >= chunk_size_bytes:
                     chunk_bytes = audio_buffer[:chunk_size_bytes]
@@ -675,8 +835,13 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                     speech_prob = 1.0
                     is_speech = False
                     if engine.vad_model:
+                        vad_window_size = 512
+                        vad_input = pcm_data[:vad_window_size]
+                        if len(vad_input) < vad_window_size:
+                            vad_input = np.pad(vad_input, (0, vad_window_size - len(vad_input)))
                         with torch.no_grad():
-                            speech_prob = engine.vad_model(torch.from_numpy(pcm_data).squeeze(), settings.sample_rate).item()
+                            speech_prob = engine.vad_model(torch.from_numpy(vad_input), settings.sample_rate).item()
+                        logger.debug("VAD evaluated: session=%s probability=%.3f", session_id, speech_prob)
                         is_speech = speech_prob >= settings.vad_threshold
                     else: 
                         is_speech = True 
@@ -687,6 +852,7 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                         if not session.is_speaking:
                             session.is_speaking = True
                             session.speech_start_time = current_time
+                            logger.info("VAD speech start: session=%s probability=%.3f", session_id, speech_prob)
                         session.speech_buffer.append(pcm_data)
                         session.vad_probs.append(speech_prob)
                         
@@ -695,9 +861,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
                     if not is_speech and session.is_speaking:
                         speech_duration = len(session.speech_buffer) * (settings.chunk_duration_ms / 1000.0)
+                        logger.info(
+                            "VAD speech end: session=%s duration=%.2fs probability=%.3f",
+                            session_id,
+                            speech_duration,
+                            speech_prob,
+                        )
                         if speech_duration >= settings.min_speech_duration_s:
                             full_speech_array = np.concatenate(session.speech_buffer)
-                            
+                            logger.info("Audio analysis started: session=%s samples=%d", session_id, len(full_speech_array))
                             async with engine.aasist_lock:
                                 ml_result = await asyncio.to_thread(
                                     realtime_multimodal_worker_sync, 
@@ -706,11 +878,21 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
                                 )
 
                             if ml_result["text"]:
+                                logger.info("Audio analysis completed: session=%s transcript=%r", session_id, ml_result["text"])
                                 await websocket.send_json({
                                     "event": "INTENT_ANALYZED", "timestamp": current_time, 
                                     "transcript_latest": ml_result["text"], "risk_score": ml_result["risk_score"],
+                                    "audio_decision": "FAKE" if ml_result["risk_score"] >= settings.decision_threshold else "REAL",
                                     "threat_level": ml_result["threat_level"], "reasoning": ml_result["reasoning"]
                                 })
+                                session.audio_risk_score = float(ml_result["risk_score"])
+                                session.audio_decision = "FAKE" if session.audio_risk_score >= settings.decision_threshold else "REAL"
+                                fusion_result = build_fusion_result(session)
+                                await websocket.send_json(fusion_result)
+                                logger.info("[FUSION] audio_score=%s video_score=%s final=%s", fusion_result["audio_risk_score"], fusion_result["video_fake_score"], fusion_result["final_decision"])
+                                logger.info("INTENT_ANALYZED event sent: %s", session_id)
+                            else:
+                                logger.info("Audio analysis produced no transcript: %s", session_id)
                         session.reset_speech_buffer()
                 audio_queue.task_done()
         except asyncio.CancelledError:
@@ -719,19 +901,102 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
             logger.exception(f"WebSocket Processing Error - {e}")
 
     processor_task = asyncio.create_task(process_audio())
+    logger.info("Audio processing task created: %s", session_id)
 
     try:
         while True:
-            data = await websocket.receive_bytes()
-            if audio_queue.full():
+            message = await websocket.receive()
+            message_type = message.get("type")
+
+            if message_type == "websocket.disconnect":
+                logger.info("WebSocket disconnect message received: %s", session_id)
+                break
+
+            audio_data = message.get("bytes")
+            if audio_data is not None:
+                if not audio_data:
+                    logger.warning("Empty audio message received: %s", session_id)
+                    continue
+                if audio_queue.full():
+                    try:
+                        audio_queue.get_nowait()
+                        logger.warning("Queue Full: Oldest frame discarded.")
+                    except asyncio.QueueEmpty:
+                        pass
+                await audio_queue.put(audio_data)
+                logger.debug("Audio PCM queued: session=%s bytes=%d queue=%d", session_id, len(audio_data), audio_queue.qsize())
+                continue
+
+            text_data = message.get("text")
+            if text_data is not None:
                 try:
-                    audio_queue.get_nowait()
-                    logger.warning("Queue Full: Oldest frame discarded.")
-                except asyncio.QueueEmpty:
-                    pass
-            await audio_queue.put(data)
+                    payload = json.loads(text_data)
+                except json.JSONDecodeError:
+                    logger.warning("Invalid WebSocket JSON received: %s", session_id)
+                    continue
+
+                if not isinstance(payload, dict):
+                    logger.warning("Unexpected WebSocket JSON payload received: %s", session_id)
+                    continue
+
+                if payload.get("type") == "video_frame":
+                    image_data = payload.get("data")
+                    if not isinstance(image_data, str) or not image_data.strip():
+                        logger.warning("Empty video frame received: %s", session_id)
+                        continue
+
+                    if engine.video_model is None or engine.video_preprocess is None:
+                        logger.warning("Video frame received but video model is unavailable: %s", session_id)
+                        continue
+
+                    try:
+                        async with engine.video_lock:
+                            video_result = await asyncio.to_thread(
+                                analyze_video_frame,
+                                image_data,
+                                engine.video_model,
+                                engine.video_preprocess,
+                            )
+                        if not video_result["valid"]:
+                            session.video_valid_flags.append(False)
+                            logger.info("[VIDEO] session=%s face=%s confidence=%.3f sharpness=%s brightness=%s valid=False", session_id, video_result["face_detected"], video_result["face_detection_confidence"], video_result.get("sharpness"), video_result.get("brightness"))
+                            await websocket.send_json({"event": "VIDEO_ANALYZED", "status": "LOW_QUALITY", "video_score": None, "video_decision": "ANALYZING", "valid_frame_count": len(session.video_raw_scores), **video_result})
+                            continue
+
+                        video_state = update_video_decision(session, video_result["raw_score"])
+                        video_score = video_state.get("video_score")
+                        decision = video_state["video_decision"]
+                        threat_level = "HIGH" if decision == "FAKE" else "LOW"
+                        await websocket.send_json({
+                            "event": "VIDEO_ANALYZED",
+                            "video_raw_score": round(video_result["raw_score"], 4),
+                            "video_score": video_score,
+                            "video_decision": decision,
+                            "face_detected": video_result["face_detected"],
+                            "face_detection_confidence": video_result["face_detection_confidence"],
+                            "sharpness": video_result["sharpness"],
+                            "brightness": video_result["brightness"],
+                            "threat_level": threat_level,
+                            **video_state,
+                        })
+                        session.video_fake_score = video_score
+                        session.video_decision = decision
+                        fusion_result = build_fusion_result(session)
+                        await websocket.send_json(fusion_result)
+                        logger.info("[FUSION] audio_score=%s video_score=%s final=%s", fusion_result["audio_risk_score"], fusion_result["video_fake_score"], fusion_result["final_decision"])
+                        logger.info("[VIDEO] session=%s raw=%.3f median=%s trimmed=%s smoothed=%s valid=%d decision=%s", session_id, video_result["raw_score"], video_state.get("median"), video_state.get("trimmed_mean"), video_score, video_state["valid_frame_count"], decision)
+                    except Exception:
+                        logger.exception("Video frame analysis failed: %s", session_id)
+                    continue
+
+                logger.warning("Unknown WebSocket text message type: %r", payload.get("type"))
+                continue
+
+            logger.warning("Unexpected WebSocket message received: %s", message_type)
     except WebSocketDisconnect:
         logger.info(f"🔌 [WebSocket 종료] 클라이언트 해제: {session_id}")
+    except Exception:
+        logger.exception("WebSocket receive error: %s", session_id)
     finally:
         # 1) 워커 태스크를 취소하고, 실제로 취소가 완료될 때까지 기다린다.
         #    (await 없이 cancel()만 호출하면 태스크가 이벤트 루프에 잠깐 더 남아있어

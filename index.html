@@ -270,7 +270,7 @@
             <div class="card card-01" id="card-01">
                 <div class="current-badge">현재 판정</div>
                 <!-- 수정 후 -->
-                <div class="card-title">(0,1) <span style="color:#dc3545">FAKE</span> & <span style="color:#007bff">REAL</span></div>
+                <div class="card-title">(0,1) <span style="color:#007bff">REAL</span> & <span style="color:#dc3545">FAKE</span></div>
                 <div class="card-subtitle">(A<sub>F</sub>V<sub>R</sub>)</div>
                 <div class="card-content">
                     <div class="icon" style="color:#dc3545">❌<br><span style="font-size:14px;">가짜</span></div>
@@ -285,8 +285,8 @@
             <!-- 1,0 -->
             <div class="card card-10" id="card-10">
                 <div class="current-badge">현재 판정</div>
-                <div class="card-title">(1,0) <span style="color:#007bff">REAL</span> & <span style="color:#dc3545">FAKE</span></div>
-<div class="card-subtitle">(A<sub>R</sub>V<sub>F</sub>)</div>
+                <div class="card-title">(1,0) <span style="color:#dc3545">FAKE</span> & <span style="color:#007bff">REAL</span></div>
+<div class="card-subtitle">(A<sub>F</sub>V<sub>R</sub>)</div>
 <div class="card-content">
     <div class="icon" style="color:#dc3545">❌<br><span style="font-size:14px;">가짜</span></div>
                     <canvas class="card-snapshot" id="snap-10"></canvas>
@@ -344,7 +344,9 @@
         let clearTimer = null;
 
         let currentAudioScore = 0.0;
-        let currentVideoScore = 0.0;
+        let currentVideoScore = 0.01;
+        let currentAudioDecision = "ANALYZING";
+        let currentVideoDecision = "ANALYZING";
 
         const toggleBtn = document.getElementById('toggleBtn');
         const video = document.getElementById('video');
@@ -356,12 +358,12 @@
                 try {
                     mediaStream = await navigator.mediaDevices.getUserMedia({ 
                         audio: { channelCount: 1, sampleRate: 16000 },
-                        video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: "user" }
+                        video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 15, max: 30 }, facingMode: "user" }
                     });
                     
                     video.srcObject = mediaStream;
 
-                    ws = new WebSocket("ws://127.0.0.1:8000/ws/detect/test-session-1?token=secret-token-123");
+                    ws = new WebSocket("ws://127.0.0.1:8001/ws/detect/test-session-1?token=secret-token-123");
                     ws.binaryType = "arraybuffer";
 
                     ws.onopen = () => {
@@ -371,24 +373,55 @@
                         isRunning = true;
                         
                         startAudioProcessing(mediaStream);
-                        frameInterval = setInterval(sendVideoFrame, 500);
+                        frameInterval = setInterval(sendVideoFrame, 1000);
                     };
 
                     ws.onmessage = (event) => {
-                        const data = JSON.parse(event.data);
-                        
+                        console.log("서버 원본 메시지:", event.data);
+
+                        let data;
+                        try {
+                            data = JSON.parse(event.data);
+                        } catch (error) {
+                            console.error("WebSocket message JSON parse failed:", error, event.data);
+                            return;
+                        }
+
                         if (data.event === "VIDEO_ANALYZED") {
-                            currentVideoScore = data.video_score || 0;
+                            console.log({ raw: data.video_raw_score, smoothed: data.video_score, decision: data.video_decision, validFrames: data.valid_frame_count, status: data.status });
+                            currentVideoDecision = data.video_decision;
+                            currentVideoScore = data.video_score;
                             updateUI("", currentAudioScore, currentVideoScore, data.threat_level);
-                        } 
+                        }
                         else if (data.event === "INTENT_ANALYZED" || data.transcript_latest) {
                             currentAudioScore = data.risk_score || 0;
+                            currentAudioDecision = data.audio_decision || currentAudioDecision;
                             updateUI(data.transcript_latest, currentAudioScore, currentVideoScore, data.threat_level);
+                        } else {
+                            console.warn("Unknown WebSocket event:", data);
                         }
                     };
 
-                    ws.onclose = () => {
-                        stopSystem();
+                    ws.onerror = (event) => {
+                        console.error("WebSocket error", {
+                            event,
+                            url: ws?.url,
+                            readyState: ws?.readyState
+                        });
+                    };
+
+                    ws.onclose = (event) => {
+                        console.warn("WebSocket closed", {
+                            code: event.code,
+                            reason: event.reason,
+                            wasClean: event.wasClean
+                        });
+                        stopSystem(false);
+                        setTimeout(() => {
+                            const transcriptElement = document.getElementById('ui-transcript');
+                            transcriptElement.style.color = '#dc3545';
+                            transcriptElement.textContent = `WebSocket disconnected (code: ${event.code}, reason: ${event.reason || 'none'}, clean: ${event.wasClean})`;
+                        }, 0);
                         document.getElementById('ui-transcript').innerHTML = `<span style="color:#dc3545;">서버와 연결이 끊어졌습니다. ❌</span>`;
                     };
 
@@ -405,9 +438,8 @@
             let audioPct = (audioRisk * 100).toFixed(1);
             let videoPct = (videoRisk * 100).toFixed(1);
 
-            const THRESHOLD = 60.0;
-            const isAudioFake = (audioRisk * 100) >= THRESHOLD;
-            const isVideoFake = (videoRisk * 100) >= THRESHOLD;
+            const isAudioFake = currentAudioDecision === "FAKE";
+            const isVideoFake = currentVideoDecision === "FAKE";
 
             if (transcript) {
                 if (clearTimer) clearTimeout(clearTimer);
@@ -422,7 +454,9 @@
             document.getElementById('ui-video-score').innerText = videoPct + "%";
 
             const threatElem = document.getElementById('ui-threat');
-            if (isAudioFake || isVideoFake) {
+            if (!isAudioFake && !isVideoFake && (currentVideoDecision === "ANALYZING" || currentVideoDecision === "UNCERTAIN")) {
+                threatElem.innerHTML = `<span style="color: #888;">분석 중</span>`;
+            } else if (isAudioFake || isVideoFake) {
                 threatElem.innerHTML = `<span class="decision-fake" style="color: #dc3545;">사기 O</span>`;
             } else {
                 threatElem.innerHTML = `<span class="decision-real" style="color: #007bff;">사기 X</span>`;
@@ -430,12 +464,11 @@
 
             document.querySelectorAll('.card').forEach(c => c.classList.remove('active'));
             
-            let activeCardId = "";
-            if (!isAudioFake && !isVideoFake) activeCardId = 'card-00'; 
-            else if (isAudioFake && !isVideoFake) activeCardId = 'card-01'; 
-            else if (!isAudioFake && isVideoFake) activeCardId = 'card-10'; 
-            else if (isAudioFake && isVideoFake) activeCardId = 'card-11'; 
-
+            if (!["REAL", "FAKE"].includes(currentAudioDecision) || !["REAL", "FAKE"].includes(currentVideoDecision)) return;
+            const audioBit = currentAudioDecision === "FAKE" ? 1 : 0;
+            const videoBit = currentVideoDecision === "FAKE" ? 1 : 0;
+            const activeCardId = `card-${audioBit}${videoBit}`;
+            console.log({ audioDecision: currentAudioDecision, videoDecision: currentVideoDecision, audioBit, videoBit, cardId: activeCardId, currentAudioScore, currentVideoScore });
             const activeCard = document.getElementById(activeCardId);
             activeCard.classList.add('active');
 
@@ -473,9 +506,11 @@
         }
 
         function sendVideoFrame() {
-            if (ws && ws.readyState === WebSocket.OPEN && video.readyState === video.HAVE_ENOUGH_DATA) {
-                ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-                const imageData = canvas.toDataURL('image/jpeg', 0.7);
+            if (ws && ws.readyState === WebSocket.OPEN && video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0 && video.videoHeight > 0) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                ctx.drawImage(video, 0, 0, video.videoWidth, video.videoHeight);
+                const imageData = canvas.toDataURL('image/jpeg', 0.95);
                 
                 ws.send(JSON.stringify({
                     type: "video_frame",
@@ -484,7 +519,7 @@
             }
         }
 
-        function stopSystem() {
+        function stopSystem(closeSocket = true) {
             isRunning = false;
             toggleBtn.innerText = "시스템 시작 및 연결";
             toggleBtn.className = "";
@@ -495,7 +530,11 @@
             if (processor) { processor.disconnect(); processor = null; }
             if (audioContext) { audioContext.close(); audioContext = null; }
             if (mediaStream) { mediaStream.getTracks().forEach(track => track.stop()); mediaStream = null; }
-            if (ws) { ws.close(); ws = null; }
+            if (ws) {
+                const socket = ws;
+                ws = null;
+                if (closeSocket) socket.close();
+            }
             video.srcObject = null;
         }
     </script>

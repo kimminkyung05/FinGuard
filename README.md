@@ -56,7 +56,8 @@ Xception 추론에 필요한 FastAPI, OpenCV, PyTorch, TorchVision 등을 설치
 
 ```powershell
 python -m pip install -r voice\aasist\requirements.txt
-python -m pip install fastapi "uvicorn[standard]" python-multipart pydantic-settings faster-whisper pydub imageio-ffmpeg scipy praat-parselmouth transformers sentence-transformers
+python -m pip install fastapi "uvicorn[standard]" python-multipart 
+python -m pip install pydantic-settings faster-whisper pydub imageio-ffmpeg scipy praat-parselmouth transformers sentence-transformers
 ```
 
 음성 분석 스택은 최초 실행 시 일부 모델 파일을 내려받을 수 있습니다. 처음 실행할 때는 인터넷 연결과 충분한 디스크 공간이 필요합니다.
@@ -116,6 +117,34 @@ Invoke-RestMethod http://127.0.0.1:8001/health
 ## 브라우저 프로토타입
 
 `index.html`은 카메라와 마이크 권한을 요청하는 로컬 프로토타입입니다. 현재 개발용 WebSocket 주소와 토큰이 코드에 고정되어 있으므로, 사용 전 음성 서버 주소와 `FRAUD_WS_API_TOKEN`에 맞게 변경해야 합니다. 배포 환경의 클라이언트 코드에는 토큰을 포함하지 마세요.
+
+### 로컬 실행
+
+각 명령은 저장소 최상위(`FaceForensics`)에서 별도 PowerShell 창으로 실행합니다.
+
+1. 영상 API (8000)
+
+```powershell
+python -m uvicorn DeepFake.app.main:app --host 127.0.0.1 --port 8000
+```
+
+2. 음성 및 실시간 WebSocket API (8001)
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+$env:FRAUD_WS_API_TOKEN = "secret-token-123"
+python -m uvicorn voice.server:app --host 127.0.0.1 --port 8001
+```
+
+`FRAUD_WS_API_TOKEN` 값은 `index.html`의 WebSocket URL에 있는 `token` 쿼리 값과 같아야 합니다. PowerShell 환경변수는 해당 창을 닫으면 초기화되므로, 새 창에서는 다시 설정해야 합니다.
+
+3. 프론트엔드 (5500)
+
+```powershell
+python -m http.server 5500
+```
+
+브라우저에서 `http://127.0.0.1:5500/index.html`을 열고 카메라와 마이크 권한을 허용합니다.
 
 ## 테스트
 
