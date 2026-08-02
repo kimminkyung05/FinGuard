@@ -40,118 +40,99 @@ FaceForensics는 영상 딥페이크와 음성 스푸핑/보이스피싱 징후�
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-```
-
 현재 PowerShell 세션에서 실행 정책 때문에 활성화 스크립트가 차단되면 다음을 실행합니다.
 
-```powershell
+PowerShell
 Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 .\.venv\Scripts\Activate.ps1
-```
+가상환경이 활성화되면 프롬프트 앞에 (.venv)가 표시됩니다. 새 터미널을 열었을 때도 작업 전에 같은 가상환경을 다시 활성화해야 합니다.
 
-가상환경이 활성화되면 프롬프트 앞에 `(.venv)`가 표시됩니다. 새 터미널을 열었을 때도 작업 전에 같은 가상환경을 다시 활성화해야 합니다.
-
-## 의존성 설치
-
-### 영상 API
-
-```powershell
+의존성 설치
+영상 API
+PowerShell
 python -m pip install -r DeepFake\requirements.txt
-```
-
 Xception 추론에 필요한 FastAPI, OpenCV, PyTorch, TorchVision 등을 설치합니다.
 
-### 음성 API
-
-```powershell
+음성 API
+PowerShell
 python -m pip install -r voice\aasist\requirements.txt
 python -m pip install fastapi "uvicorn[standard]" python-multipart pydantic-settings faster-whisper pydub imageio-ffmpeg scipy praat-parselmouth transformers sentence-transformers joblib
-```
-
 음성 분석 스택은 최초 실행 시 SBERT 및 Whisper 모델 파일 등 대용량 파일을 내려받을 수 있습니다. 처음 실행할 때는 인터넷 연결과 충분한 디스크 공간이 필요합니다.
 
-## 영상 딥페이크 API
-
-API는 로컬 체크포인트 `DeepFake/video/face_detection/xception/all_c23.p`를 사용합니다.
-
+영상 딥페이크 API
+API는 로컬 체크포인트 DeepFake/video/face_detection/xception/all_c23.p를 사용합니다.
 저장소 최상위에서 서버를 실행합니다.
 
-```powershell
+PowerShell
 python -m uvicorn DeepFake.app.main:app --host 127.0.0.1 --port 8000
-```
-
 대화형 API 문서:
 
-```text
+Plaintext
 [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
-```
-
 상태 확인:
 
-```powershell
+PowerShell
 Invoke-RestMethod [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-```
+영상 분석 엔드포인트는 POST /video/analyze이며 .mp4, .avi, .mov, .mkv 업로드를 지원합니다.
 
-영상 분석 엔드포인트는 `POST /video/analyze`이며 `.mp4`, `.avi`, `.mov`, `.mkv` 업로드를 지원합니다.
-
-### 영상 결과 해석
-
+영상 결과 해석
 응답에는 다음 주요 필드가 포함됩니다.
 
-- `scores.video_fake_score`: 유효 얼굴 프레임에서 집계한 Xception 가짜 점수
-- `scores.confidence_score`: 분석 품질과 일관성 평가 점수
-- `risk.decision`: `APPROVE`, `RETRY`, `BLOCK`
-- `frame_analysis.statistics`: 평균, 최솟값/최댓값, 상위 구간 평균, 고위험 프레임 비율
+scores.video_fake_score: 유효 얼굴 프레임에서 집계한 Xception 가짜 점수
+
+scores.confidence_score: 분석 품질과 일관성 평가 점수
+
+risk.decision: APPROVE, RETRY, BLOCK
+
+frame_analysis.statistics: 평균, 최솟값/최댓값, 상위 구간 평균, 고위험 프레임 비율
 
 모델의 원시 점수는 보정된 확률이 아닙니다. 운영 임계값을 적용하기 전, 실제 사용 환경을 대표하는 라벨 데이터로 점수 보정을 수행해야 합니다.
 
-## 음성 API
-
+음성 API
 음성 WebSocket은 토큰이 필요합니다. 서버 실행 전 활성화된 터미널에서 토큰을 설정합니다.
 
-```powershell
+PowerShell
 $env:FRAUD_WS_API_TOKEN = "replace-with-a-long-random-token"
 python -m uvicorn voice.server:app --host 127.0.0.1 --port 8001
-```
-
 상태 확인: 엔드포인트는 시스템 과부하 상태(System Degraded) 및 탑재된 모델별 로드 상태를 반환합니다.
 
-```powershell
+PowerShell
 Invoke-RestMethod [http://127.0.0.1:8001/health](http://127.0.0.1:8001/health)
-```
+배치 분석 엔드포인트: POST /analyze/pipeline (오디오 파일과 텍스트를 동시에 분석하여 XAI 설명 리포트 제공)
 
-- **배치 분석 엔드포인트**: `POST /analyze/pipeline` (오디오 파일과 텍스트를 동시에 분석하여 XAI 설명 리포트 제공)
-- **실시간 엔드포인트**: `WS /ws/detect/{session_id}` (화자 발화 구간을 VAD로 실시간 분리하여 지속적인 위협 모니터링 수행)
+실시간 엔드포인트: WS /ws/detect/{session_id} (화자 발화 구간을 VAD로 실시간 분리하여 지속적인 위협 모니터링 수행)
 
-### 음성 결과 해석
+음성 결과 해석
 하이브리드 융합 엔진에 의해 도출된 최종 결과는 다음의 위협 수준(Threat Level) 중 하나로 반환됩니다:
-- `NORMAL`
-- `MODERATE RISK`
-- `HIGH RISK`
-- `MANUAL REVIEW (HIGH UNCERTAINTY)` (입력 신호 충돌 및 불확실성이 설정된 임계치(Tau)를 초과할 경우)
 
-## 브라우저 프로토타입
+NORMAL
 
-`index.html`은 카메라와 마이크 권한을 요청하는 로컬 프로토타입입니다. 현재 개발용 WebSocket 주소와 토큰이 코드에 고정되어 있으므로, 사용 전 음성 서버 주소와 `FRAUD_WS_API_TOKEN`에 맞게 변경해야 합니다. 배포 환경의 클라이언트 코드에는 토큰을 포함하지 마세요.
+MODERATE RISK
 
-## 테스트
+HIGH RISK
 
+MANUAL REVIEW (HIGH UNCERTAINTY) (입력 신호 충돌 및 불확실성이 설정된 임계치(Tau)를 초과할 경우)
+
+브라우저 프로토타입
+index.html은 카메라와 마이크 권한을 요청하는 로컬 프로토타입입니다. 현재 개발용 WebSocket 주소와 토큰이 코드에 고정되어 있으므로, 사용 전 음성 서버 주소와 FRAUD_WS_API_TOKEN에 맞게 변경해야 합니다. 배포 환경의 클라이언트 코드에는 토큰을 포함하지 마세요.
+
+테스트
 저장소 최상위에서 영상 의사결정 레이어 테스트를 실행합니다.
 
-```powershell
+PowerShell
 python -m unittest DeepFake.tests.test_video_service -v
-```
-
 이 테스트는 점수 집계, 신뢰도, 의사결정 정책을 검증합니다. 모델 정확도나 영상/음성 데이터셋 기반 성능 평가는 별도로 수행해야 합니다.
 
-## 보안 및 운영 주의 사항
+보안 및 운영 주의 사항
+모델 파일은 신뢰할 수 있는 출처의 파일만 사용하세요. 기존 Xception 체크포인트는 직렬화된 PyTorch 모델 객체로 로드됩니다.
 
-- 모델 파일은 신뢰할 수 있는 출처의 파일만 사용하세요. 기존 Xception 체크포인트는 직렬화된 PyTorch 모델 객체로 로드됩니다.
-- API 토큰, 업로드 영상, 생성 영상, 개인 정보를 포함할 수 있는 분석 결과는 Git에 커밋하지 마세요.
-- C23 Xception 체크포인트는 FaceForensics 형식의 압축 영상으로 학습되었습니다. 웹캠, 화면 녹화, 재인코딩 영상은 학습 분포와 달라 과신 점수가 나올 수 있습니다.
-- 음성 분석 시 텍스트 융합 엔진은 '돈 요구' 등 특정 위험 키워드 감지 시, 다른 신뢰도 지표를 무시하고 위험도를 최대(0.99)로 재정의할 수 있습니다.
-- `RETRY` 또는 `MANUAL REVIEW` 결과는 재촬영 또는 사람의 검토 흐름으로 연결하세요. 원시 모델 점수를 보정 확률로 해석하면 안 됩니다.
+API 토큰, 업로드 영상, 생성 영상, 개인 정보를 포함할 수 있는 분석 결과는 Git에 커밋하지 마세요.
 
-## 라이선스 및 출처
+C23 Xception 체크포인트는 FaceForensics 형식의 압축 영상으로 학습되었습니다. 웹캠, 화면 녹화, 재인코딩 영상은 학습 분포와 달라 과신 점수가 나올 수 있습니다.
 
+음성 분석 시 텍스트 융합 엔진은 '돈 요구' 등 특정 위험 키워드 감지 시, 다른 신뢰도 지표를 무시하고 위험도를 최대(0.99)로 재정의할 수 있습니다.
+
+RETRY 또는 MANUAL REVIEW 결과는 재촬영 또는 사람의 검토 흐름으로 연결하세요. 원시 모델 점수를 보정 확률로 해석하면 안 됩니다.
+
+라이선스 및 출처
 저장소에는 서드파티 FaceForensics 및 AASIST 자료가 포함되어 있습니다. 재배포 또는 상업적 사용 전 각 프로젝트에 포함된 라이선스와 고지 파일을 확인하세요.
