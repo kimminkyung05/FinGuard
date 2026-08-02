@@ -679,6 +679,8 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
                                     if ml_result["text"]:
                                         try:
+                                            import json
+                                            logger.info(f"실시간 분석 결과:\n{json.dumps(ml_result, indent=2, ensure_ascii=False)}")
                                             await websocket.send_json({
                                                 "event": "INTENT_ANALYZED",
                                                 "transcript_latest": ml_result["text"],
@@ -771,3 +773,5 @@ async def analyze_multimodal_api():
         "risk_level": "HIGH_RISK",
         "decision": "BLOCK_TRANSACTION"
     }
+    
+    
