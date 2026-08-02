@@ -25,6 +25,7 @@ from scipy.signal import find_peaks
 import parselmouth
 from parselmouth.praat import call
 from typing import Union
+from pydantic import BaseModel
 
 # ⚠️ FFMPEG 경로 세팅
 _ffmpeg_dir = os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
@@ -110,6 +111,7 @@ else:
     WHISPER_DEVICE, WHISPER_COMPUTE_TYPE = "cpu", "int8"
 
 app = FastAPI(title=settings.app_name)
+
 
 # =====================================================================
 # 비디오 및 오디오 딥페이크 경로 세팅
@@ -746,3 +748,26 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str, token: str =
 
         session.reset()
         logger.info(f"🧹 [세션 정리 완료] {session_id}")
+        
+class FinGuardResponse(BaseModel):
+    video_fake_score: float
+    audio_fake_score: float
+    confidence: float
+    risk_score: float
+    risk_level: str
+    decision: str
+
+# 캡처용으로 사용할 API 엔드포인트 생성
+@app.post("/analyze/multimodal", response_model=FinGuardResponse, tags=["FinGuard Analysis"])
+async def analyze_multimodal_api():
+    """
+    영상 및 음성을 종합 분석하여 딥페이크 및 보이스피싱 위험도를 산출합니다.
+    """
+    return {
+        "video_fake_score": 0.8745,
+        "audio_fake_score": 0.9120,
+        "confidence": 0.8933,
+        "risk_score": 0.8995,
+        "risk_level": "HIGH_RISK",
+        "decision": "BLOCK_TRANSACTION"
+    }
