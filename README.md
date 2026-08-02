@@ -3,16 +3,24 @@
 FaceForensics는 영상 딥페이크와 음성 스푸핑/보이스피싱 징후를 분석하는 실험용 안티프로드 프로젝트입니다.
 
 - FaceForensics 데이터 기반 Xception 모델을 이용한 영상 딥페이크 분석
-- AASIST, Whisper, VAD, 텍스트 위험 신호를 이용한 음성 분석
+- AASIST, Whisper(large-v3), VAD, SBERT 텍스트 위험 신호 및 비언어 특징 추출을 이용한 하이브리드 음성 분석
 
 이 프로젝트는 개발 중입니다. 모델 점수는 분석용 지표이며, 법적 판단, 본인 인증, 자동 차단의 단독 근거로 사용해서는 안 됩니다.
+
+## 🎙️ 주요 음성 분석 기능 (Hybrid App)
+
+- **QC 필터링 및 신호 품질 검사**: 오디오의 SNR(신호 대 잡음비)을 측정하고, 신호의 클리핑(Clipping) 비율을 탐지하여 분석 신뢰도 가중치에 반영합니다.
+- **비언어 특징 분석 (Prosody)**: 발화에서 Jitter, Shimmer, HNR, F0(기본 주파수) 분산 등 파라링구이스틱(Paralinguistic) 비언어 특징을 추출하여 모델 융합에 활용합니다.
+- **하이브리드 의미론적 위험 (Semantic Risk)**: SBERT 기반의 피싱 앵커 텍스트 유사도 검사와 정규식을 결합하여, 대화 내 금전 요구 및 사칭 키워드 의도를 정밀하게 탐지합니다.
+- **문맥 유지형 동적 STT**: 실시간 스트림에서 이전 대화 이력을 프롬프트로 재사용하여, 끊김 없이 문맥이 유지되는 고정밀 음성 인식을 수행합니다.
+- **신뢰도 기반 융합 (Gating Fusion)**: 음성 스푸핑 점수, 텍스트 위험도, 비언어 점수의 충돌(Jensen-Shannon 발산)과 몬테카를로 드롭아웃(MCD) 분산을 계산하여 시스템의 불확실성을 측정합니다.
 
 ## 저장소 구성
 
 | 경로 | 설명 |
 | --- | --- |
 | `DeepFake/` | FastAPI 기반 영상 업로드 API와 Xception 영상 추론 파이프라인 |
-| `voice/` | 음성 분석 API, 실시간 WebSocket 워커, 보조 스크립트 |
+| `voice/` | 하이브리드 음성 분석 API, 실시간 WebSocket 워커, 보조 스크립트 |
 | `voice/aasist/` | AASIST 학습, 평가, 사전학습 가중치 코드 |
 | `index.html` | 카메라와 마이크 입력을 위한 로컬 브라우저 프로토타입 |
 
@@ -21,6 +29,7 @@ FaceForensics는 영상 딥페이크와 음성 스푸핑/보이스피싱 징후�
 - Windows PowerShell
 - Python 3.11 이상
 - Git
+- FFMPEG (시스템 PATH에 추가 필요)
 - 브라우저 프로토타입 사용 시 웹캠과 마이크
 
 ## 가상환경 설정
@@ -56,10 +65,10 @@ Xception 추론에 필요한 FastAPI, OpenCV, PyTorch, TorchVision 등을 설치
 
 ```powershell
 python -m pip install -r voice\aasist\requirements.txt
-python -m pip install fastapi "uvicorn[standard]" python-multipart pydantic-settings faster-whisper pydub imageio-ffmpeg scipy praat-parselmouth transformers sentence-transformers
+python -m pip install fastapi "uvicorn[standard]" python-multipart pydantic-settings faster-whisper pydub imageio-ffmpeg scipy praat-parselmouth transformers sentence-transformers joblib
 ```
 
-음성 분석 스택은 최초 실행 시 일부 모델 파일을 내려받을 수 있습니다. 처음 실행할 때는 인터넷 연결과 충분한 디스크 공간이 필요합니다.
+음성 분석 스택은 최초 실행 시 SBERT 및 Whisper 모델 파일 등 대용량 파일을 내려받을 수 있습니다. 처음 실행할 때는 인터넷 연결과 충분한 디스크 공간이 필요합니다.
 
 ## 영상 딥페이크 API
 
@@ -74,13 +83,13 @@ python -m uvicorn DeepFake.app.main:app --host 127.0.0.1 --port 8000
 대화형 API 문서:
 
 ```text
-http://127.0.0.1:8000/docs
+[http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 ```
 
 상태 확인:
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8000/health
+Invoke-RestMethod [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 ```
 
 영상 분석 엔드포인트는 `POST /video/analyze`이며 `.mp4`, `.avi`, `.mov`, `.mkv` 업로드를 지원합니다.
@@ -105,13 +114,21 @@ $env:FRAUD_WS_API_TOKEN = "replace-with-a-long-random-token"
 python -m uvicorn voice.server:app --host 127.0.0.1 --port 8001
 ```
 
-상태 확인:
+상태 확인: 엔드포인트는 시스템 과부하 상태(System Degraded) 및 탑재된 모델별 로드 상태를 반환합니다.
 
 ```powershell
-Invoke-RestMethod http://127.0.0.1:8001/health
+Invoke-RestMethod [http://127.0.0.1:8001/health](http://127.0.0.1:8001/health)
 ```
 
-배치 분석 엔드포인트는 `POST /analyze/pipeline`이며, 실시간 엔드포인트는 `WS /ws/detect/{session_id}`입니다.
+- **배치 분석 엔드포인트**: `POST /analyze/pipeline` (오디오 파일과 텍스트를 동시에 분석하여 XAI 설명 리포트 제공)
+- **실시간 엔드포인트**: `WS /ws/detect/{session_id}` (화자 발화 구간을 VAD로 실시간 분리하여 지속적인 위협 모니터링 수행)
+
+### 음성 결과 해석
+하이브리드 융합 엔진에 의해 도출된 최종 결과는 다음의 위협 수준(Threat Level) 중 하나로 반환됩니다:
+- `NORMAL`
+- `MODERATE RISK`
+- `HIGH RISK`
+- `MANUAL REVIEW (HIGH UNCERTAINTY)` (입력 신호 충돌 및 불확실성이 설정된 임계치(Tau)를 초과할 경우)
 
 ## 브라우저 프로토타입
 
@@ -132,7 +149,8 @@ python -m unittest DeepFake.tests.test_video_service -v
 - 모델 파일은 신뢰할 수 있는 출처의 파일만 사용하세요. 기존 Xception 체크포인트는 직렬화된 PyTorch 모델 객체로 로드됩니다.
 - API 토큰, 업로드 영상, 생성 영상, 개인 정보를 포함할 수 있는 분석 결과는 Git에 커밋하지 마세요.
 - C23 Xception 체크포인트는 FaceForensics 형식의 압축 영상으로 학습되었습니다. 웹캠, 화면 녹화, 재인코딩 영상은 학습 분포와 달라 과신 점수가 나올 수 있습니다.
-- `RETRY` 결과는 재촬영 또는 사람의 검토 흐름으로 연결하세요. 원시 모델 점수를 보정 확률로 해석하면 안 됩니다.
+- 음성 분석 시 텍스트 융합 엔진은 '돈 요구' 등 특정 위험 키워드 감지 시, 다른 신뢰도 지표를 무시하고 위험도를 최대(0.99)로 재정의할 수 있습니다.
+- `RETRY` 또는 `MANUAL REVIEW` 결과는 재촬영 또는 사람의 검토 흐름으로 연결하세요. 원시 모델 점수를 보정 확률로 해석하면 안 됩니다.
 
 ## 라이선스 및 출처
 
